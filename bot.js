@@ -1,7 +1,8 @@
-// bot.js — Dopros Trainer (multilingual, with status + evaluation)
-const { Bot, InlineKeyboard } = require('grammy');
+// bot.js — Dopros Trainer (multilingual, with status + evaluation + TXT export)
+const { Bot, InlineKeyboard, InputFile } = require('grammy');
 const OpenAI = require('openai');
 const express = require('express');
+const fs = require('fs');
 
 // ============ CONFIG ============
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
@@ -27,17 +28,17 @@ const STATUS = {
 };
 
 // ============ SYSTEM PROMPTS ============
-function buildPrompt(jur, status, lang) {
+function buildPrompt(jur, status) {
   const statusRu = STATUS[status]?.ru || 'Свидетель';
   const statusDe = STATUS[status]?.de || 'Zeuge';
 
   const base = {
     KZ: {
-      lang: 'русском',
       code: 'Республика Казахстан',
       laws: `- Конституция РК, ст. 77 п. 7 — право не свидетельствовать против себя, супруга и близких родственников
 - Конституция РК, ст. 77 п. 6 — обвиняемый не обязан доказывать свою невиновность
 - Конституция РК, ст. 77 п. 8 — сомнения толкуются в пользу обвиняемого
+- Конституция РК, ст. 77 п. 9 — незаконные доказательства не имеют силы
 - УПК РК, ст. 28 — освобождение от обязанности давать показания
 - УПК РК, ст. 64 — права подозреваемого
 - УПК РК, ст. 65 — права свидетеля, имеющего право на защиту
@@ -47,7 +48,6 @@ function buildPrompt(jur, status, lang) {
 - КоАП РК, ст. 744`
     },
     RU: {
-      lang: 'русском',
       code: 'Российская Федерация',
       laws: `- Конституция РФ, ст. 51 — право не свидетельствовать против себя и близких
 - Конституция РФ, ст. 49 — презумпция невиновности
@@ -61,7 +61,6 @@ function buildPrompt(jur, status, lang) {
 - КоАП РФ, ст. 25.1`
     },
     DE: {
-      lang: 'Deutsch',
       code: 'Bundesrepublik Deutschland',
       laws: `- Grundgesetz, Art. 1 — Menschenwürde
 - Grundgesetz, Art. 2 — allgemeine Handlungsfreiheit
@@ -72,6 +71,7 @@ function buildPrompt(jur, status, lang) {
 - StPO § 55 — Auskunftsverweigerungsrecht
 - StPO § 52 — Zeugnisverweigerungsrecht (Angehörige)
 - StPO § 58 — Vernehmung von Zeugen
+- StPO § 70 — Folgen der Zeugnisverweigerung
 - JGG §§ 67, 70 — Jugendstrafrecht
 - ZPO §§ 138, 141, 373, 395
 - OWiG §§ 55, 67, 71`
@@ -107,13 +107,12 @@ REGELN:
 5. Antworte NUR auf Deutsch.`;
   }
 
-  const statusRuText = statusRu;
-  return `Ты — тренажёр допроса для ${b.code}. Процессуальный статус пользователя: ${statusRuText}. Язык: русский.
+  return `Ты — тренажёр допроса для ${b.code}. Процессуальный статус пользователя: ${statusRu}. Язык: русский.
 
 РОЛЬ: Реалистичная симуляция допроса. Отвечай СТРОГО в формате:
 
 🎭 Следователь:
-(Реалистичный вопрос или реплика, соответствующие статусу "${statusRuText}". Только на русском.)
+(Реалистичный вопрос или реплика, соответствующие статусу "${statusRu}". Только на русском.)
 
 💡 Тренер-адвокат:
 • 🎯 Разбор ловушки: цель вопроса и риск
@@ -129,7 +128,7 @@ ${b.laws}
 ПРАВИЛА:
 1. Учи отвечать только на заданный вопрос.
 2. Различай "не помню" и отказ от показаний.
-3. Статус "${statusRuText}" — учитывай его.
+3. Статус "${statusRu}" — учитывай его.
 4. Не давай консультаций по существу дела.
 5. Отвечай ТОЛЬКО на русском.`;
 }
@@ -158,7 +157,7 @@ bot.command('start', async (ctx) => {
   );
 });
 
-// Выбор юрисдикции → показ меню статусов
+// Выбор юрисдикции → меню статусов
 bot.callbackQuery(/^jur:(KZ|RU|DE)$/, async (ctx) => {
   const jur = ctx.match[1];
   sessions.set(ctx.from.id, { jurisdiction: jur, status: null, incident: null, history: [] });
@@ -167,7 +166,7 @@ bot.callbackQuery(/^jur:(KZ|RU|DE)$/, async (ctx) => {
 
   if (jur === 'DE') {
     const kb = new InlineKeyboard()
-      .text('👤 Zeuge', 'st:KZ:witness').row()
+      .text('👤 Zeuge', 'st:witness').row()
       .text('🚨 Beschuldigter', 'st:suspect').row()
       .text('⚖️ Angeklagter', 'st:accused').row()
       .text('🛡️ Geschädigter', 'st:victim').row()
@@ -197,7 +196,7 @@ bot.callbackQuery(/^jur:(KZ|RU|DE)$/, async (ctx) => {
   });
 });
 
-// Выбор статуса → просьба описать инцидент
+// Выбор статуса → запрос инцидента
 bot.callbackQuery(/^st:(witness|suspect|accused|victim|plaintiff|defendant)$/, async (ctx) => {
   const status = ctx.match[1];
   const sess = sessions.get(ctx.from.id);
@@ -241,6 +240,7 @@ bot.command('help', async (ctx) => {
     '• /start — начать / beginnen\n' +
     '• /reset — сбросить / zurücksetzen\n' +
     '• /finish — завершить тренировку / Training beenden\n' +
+    '• /export — сохранить отчёт / Bericht speichern\n' +
     '• /help — справка / Hilfe',
     { parse_mode: 'Markdown' }
   );
@@ -253,8 +253,7 @@ bot.command('finish', async (ctx) => {
     return ctx.reply('Сначала начните тренировку: /start');
   }
 
-  const lang = sess.jurisdiction === 'DE' ? 'DE' : 'RU';
-  const finishPrompt = lang === 'DE'
+  const finishPrompt = sess.jurisdiction === 'DE'
     ? 'Beende die Trainingssitzung. Gib eine abschließende Bewertung: Stärken, Schwächen, Empfehlungen. Kurz und konkret.'
     : 'Заверши тренировку. Дай итоговую оценку: сильные стороны, слабые стороны, рекомендации. Кратко и по делу.';
 
@@ -276,6 +275,61 @@ bot.command('finish', async (ctx) => {
   }
 });
 
+// /export — сохранение в TXT
+bot.command('export', async (ctx) => {
+  const userId = ctx.from.id;
+  const sess = sessions.get(userId);
+
+  if (!sess || !sess.incident) {
+    return ctx.reply('Нет активной сессии. Начните с /start');
+  }
+
+  await ctx.reply('📄 Готовлю файл... / Datei wird vorbereitet...');
+
+  try {
+    let content = '';
+
+    content += '===========================================\n';
+    content += '       DOPROS TRAINER — TRAINING REPORT\n';
+    content += '===========================================\n\n';
+    content += 'Datum / Дата: ' + new Date().toISOString().slice(0, 19).replace('T', ' ') + '\n';
+    content += 'Jurisdiktion / Юрисдикция: ' + sess.jurisdiction + '\n';
+    content += 'Status / Статус: ' + (STATUS[sess.status]?.ru || '—') + ' / ' + (STATUS[sess.status]?.de || '—') + '\n\n';
+
+    content += '-------------------------------------------\n';
+    content += 'INCIDENT / ИНЦИДЕНТ:\n';
+    content += '-------------------------------------------\n';
+    content += (sess.incident || '—') + '\n\n';
+
+    content += '-------------------------------------------\n';
+    content += 'DIALOG / ДИАЛОГ:\n';
+    content += '-------------------------------------------\n\n';
+
+    sess.history.forEach((msg) => {
+      if (msg.role === 'system') return;
+      const label = msg.role === 'user' ? '► USER / ПОЛЬЗОВАТЕЛЬ' : '◆ TRAINER / ТРЕНЕР';
+      content += label + ':\n' + (msg.content || '') + '\n\n';
+    });
+
+    content += '===========================================\n';
+    content += 'Dies ist Übungsmaterial, keine Rechtsberatung.\n';
+    content += 'Это тренировочный материал, не юридическая консультация.\n';
+    content += '===========================================\n';
+
+    const tmpPath = '/tmp/Dopros_Training_' + userId + '_' + Date.now() + '.txt';
+    fs.writeFileSync(tmpPath, content, 'utf8');
+
+    await ctx.replyWithDocument(new InputFile(tmpPath), {
+      caption: '📄 Ваша тренировка сохранена. / Ihre Trainingseinheit wurde gespeichert.'
+    });
+
+    fs.unlink(tmpPath, () => {});
+  } catch (e) {
+    console.error('Export error:', e);
+    await ctx.reply('Ошибка при создании файла. / Fehler beim Erstellen der Datei.');
+  }
+});
+
 // Основной обработчик
 bot.on('message:text', async (ctx) => {
   const text = ctx.message.text;
@@ -286,7 +340,6 @@ bot.on('message:text', async (ctx) => {
   if (!sess.jurisdiction) return ctx.reply('Выберите юрисдикцию: /start');
   if (!sess.status) return ctx.reply('Выберите процессуальный статус.');
   if (!sess.incident) {
-    // Первое сообщение — инцидент
     sess.incident = text;
     sess.history = [
       { role: 'system', content: buildPrompt(sess.jurisdiction, sess.status) },
@@ -324,7 +377,7 @@ bot.on('message:text', async (ctx) => {
   }
 });
 
-// Отправка длинных
+// Отправка длинных сообщений
 async function sendLong(ctx, text, parseMode) {
   const MAX = 4000;
   const opts = parseMode ? { parse_mode: parseMode } : {};
