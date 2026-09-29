@@ -1,6 +1,7 @@
 // bot.js — Dopros Trainer (multilingual interrogation trainer)
-const { Bot, InlineKeyboard, session } = require('grammy');
+const { Bot, InlineKeyboard } = require('grammy');
 const OpenAI = require('openai');
+const express = require('express');
 
 // ============ CONFIG ============
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
@@ -64,20 +65,20 @@ const PROMPTS = {
 
 ПРАВОВАЯ БАЗА (Российская Федерация):
 - Конституция РФ, ст. 51 — право не свидетельствовать против себя, супруга и близких родственников
-- Конституция РФ, ст. 49 — презумпция невиновности, обвиняемый не обязан доказывать невиновность, неустранимые сомнения толкуются в пользу обвиняемого
+- Конституция РФ, ст. 49 — презумпция невиновности
 - Конституция РФ, ст. 50 — недопустимость доказательств, полученных незаконным способом
 - УПК РФ, ст. 46 — права подозреваемого
 - УПК РФ, ст. 47 — права обвиняемого
-- УПК РФ, ст. 56 — права свидетеля (право не свидетельствовать против себя и близких)
+- УПК РФ, ст. 56 — права свидетеля
 - УПК РФ, ст. 189 — общие правила допроса
 - УПК РФ, ст. 190 — протокол допроса
 - УПК РФ, ст. 191 — особенности допроса несовершеннолетнего
-- УПК РФ, ст. 425 — допрос несовершеннолетнего подозреваемого/обвиняемого (не более 2 часов подряд, 4 часов в день)
+- УПК РФ, ст. 425 — допрос несовершеннолетнего подозреваемого/обвиняемого
 - ГПК РФ, ст. 35, 69, 177
-- КоАП РФ, ст. 25.1 — права лица, в отношении которого ведётся производство
+- КоАП РФ, ст. 25.1
 
 ПРАВИЛА:
-1. Учи отвечать только на заданный вопрос. Не выдавай лишней информации.
+1. Учи отвечать только на заданный вопрос.
 2. Различай "не помню" и отказ от дачи показаний.
 3. Учитывай статус пользователя.
 4. Учитывай несовершеннолетних.
@@ -100,35 +101,32 @@ RECHTSGRUNDLAGE (Bundesrepublik Deutschland):
 - Grundgesetz, Art. 1 — Menschenwürde
 - Grundgesetz, Art. 2 — allgemeine Handlungsfreiheit
 - Grundgesetz, Art. 20 Abs. 3 — Rechtsstaatsprinzip
-- StPO § 136 — Belehrung des Beschuldigten (Recht zu schweigen, Recht auf Verteidiger)
+- StPO § 136 — Belehrung des Beschuldigten
 - StPO § 136a — Verbot von Folter, Täuschung, Ermüdung, Zwang
 - StPO § 163a — Vernehmung des Beschuldigten
-- StPO § 55 — Auskunftsverweigerungsrecht (Selbstbelastung, Angehörige)
+- StPO § 55 — Auskunftsverweigerungsrecht
 - StPO § 52 — Zeugnisverweigerungsrecht (Angehörige)
-- StPO § 58 — Vernehmung von Zeugen (getrennt, einzeln)
+- StPO § 58 — Vernehmung von Zeugen
 - StPO § 70 — Folgen der Zeugnisverweigerung
-- StPO § 136 Abs. 1 S. 2 — Schweigerecht
-- JGG §§ 67, 70 — Jugendstrafrecht (Vernehmung Jugendlicher, Eltern/Erziehungsberechtigte)
-- ZPO §§ 138, 141, 373, 395 — Zivilprozess (Parteivernehmung, Zeugen)
+- JGG §§ 67, 70 — Jugendstrafrecht
+- ZPO §§ 138, 141, 373, 395 — Zivilprozess
 - OWiG §§ 55, 67, 71 — Ordnungswidrigkeitenverfahren
 
 REGELN:
-1. Lehre, nur auf die gestellte Frage zu antworten. Keine überschüssigen Informationen.
+1. Lehre, nur auf die gestellte Frage zu antworten.
 2. Unterscheide zwischen "Ich erinnere mich nicht" und dem Schweigerecht.
-3. Berücksichtige den Verfahrensstatus des Nutzers (Zeuge / Beschuldigter / Angeklagter / Geschädigter / Kläger / Beklagter).
-4. Berücksichtige Jugendliche (zeitliche Beschränkungen, Anwesenheit der Erziehungsberechtigten).
-5. Keine Rechtsberatung zur Sache — nur Training des Verfahrensverhaltens.
+3. Berücksichtige den Verfahrensstatus des Nutzers.
+4. Berücksichtige Jugendliche.
+5. Keine Rechtsberatung zur Sache.
 6. Antworte NUR auf Deutsch.`
 };
 
 // ============ SESSIONS (in-memory) ============
 const sessions = new Map();
-// session: { jurisdiction, incident, history: [{role, content}] }
 
 // ============ BOT ============
 const bot = new Bot(BOT_TOKEN);
 
-// Обработка ошибок
 bot.catch((err) => {
   console.error('Bot error:', err);
 });
@@ -191,7 +189,7 @@ bot.command('help', async (ctx) => {
   );
 });
 
-// Основной обработчик — описание инцидента и диалог
+// Основной обработчик
 bot.on('message:text', async (ctx) => {
   const userId = ctx.from.id;
   const text = ctx.message.text;
@@ -209,10 +207,7 @@ bot.on('message:text', async (ctx) => {
   if (!sess.incident) {
     sess.incident = text;
     sess.history = [
-      {
-        role: 'system',
-        content: PROMPTS[sess.jurisdiction]
-      },
+      { role: 'system', content: PROMPTS[sess.jurisdiction] },
       {
         role: 'user',
         content: sess.jurisdiction === 'DE'
@@ -246,7 +241,6 @@ bot.on('message:text', async (ctx) => {
   // Диалог
   sess.history.push({ role: 'user', content: text });
 
-  // Обрезаем историю до последних 20 сообщений (кроме system)
   const sys = sess.history[0];
   const rest = sess.history.slice(1);
   if (rest.length > 20) {
@@ -273,7 +267,7 @@ bot.on('message:text', async (ctx) => {
   }
 });
 
-// Отправка длинных сообщений (Telegram ограничивает 4096 символов)
+// Отправка длинных сообщений
 async function sendLong(ctx, text) {
   const MAX = 4000;
   if (text.length <= MAX) {
@@ -292,6 +286,12 @@ async function sendLong(ctx, text) {
   }
 }
 
-// Запуск
+// ============ START BOT ============
 bot.start();
 console.log('🚀 Dopros Trainer started');
+
+// ============ HTTP-СЕРВЕР ДЛЯ RENDER ============
+const httpApp = express();
+httpApp.get('/', (req, res) => res.send('Dopros Trainer is running'));
+const PORT = process.env.PORT || 3000;
+httpApp.listen(PORT, () => console.log('HTTP server on port ' + PORT));
