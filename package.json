@@ -1,0 +1,16 @@
+{
+  "name": "doprosbot",
+  "version": "1.0.0",
+  "description": "Dopros Trainer — тренажёр допроса",
+  "main": "bot.js",
+  "scripts": {
+    "start": "node bot.js"
+  },
+  "dependencies": {
+    "grammy": "^1.30.0",
+    "openai": "^4.50.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
