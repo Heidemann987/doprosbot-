@@ -1,4 +1,4 @@
-
+{
   "name": "doprosbot",
   "version": "1.0.0",
   "description": "Dopros Trainer — тренажёр допроса",
@@ -9,10 +9,9 @@
   "dependencies": {
     "express": "^4.19.2",
     "grammy": "^1.30.0",
-    "openai": "^4.50.0",
-    "pdfkit": "^0.15.0",
-    "@fontsource/dejavu-sans": "^5.0.0"
+    "openai": "^4.50.0"
   },
   "engines": {
     "node": ">=18"
   }
+}
