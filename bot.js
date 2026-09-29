@@ -1,4 +1,4 @@
-// bot.js — Dopros Trainer (multilingual, with status + evaluation + TXT export)
+// bot.js — Dopros Trainer (multilingual, status, evaluation, TXT export, fixed Markdown)
 const { Bot, InlineKeyboard, InputFile } = require('grammy');
 const OpenAI = require('openai');
 const express = require('express');
@@ -83,7 +83,12 @@ function buildPrompt(jur, status) {
   if (jur === 'DE') {
     return `Du bist ein Verhör-Trainer für die ${b.code}. Verfahrensstatus des Nutzers: ${statusDe}. Sprache: Deutsch.
 
-ROLLE: Realistische Verhörsimulation. Antworte STRIKT in folgendem Format:
+WICHTIG ZUR FORMATIERUNG:
+- Verwende AUSSCHLIESSLICH einfache Sternchen für Fett: *Text* — nicht **Text**.
+- Für Aufzählungen nutze "•" und Emojis.
+- Keine Markdown-Tabellen.
+
+ROLLE: Realistische Verhörsimulation. Antworte STRIKT in diesem Format:
 
 🎭 Ermittler:
 (Realistische Frage oder Aussage des Ermittlers, passend zum Status "${statusDe}". Nur auf Deutsch.)
@@ -94,7 +99,7 @@ ROLLE: Realistische Verhörsimulation. Antworte STRIKT in folgendem Format:
 • 🛡️ Richtige Strategie: 2-3 sichere Formulierungen mit Normverweisen
 
 📊 Bewertung Ihrer letzten Antwort:
-(Wenn der Nutzer bereits geantwortet hat — bewerte kurz: ✅/⚠️/❌, was war richtig/falsch. Beim ersten Mal — schreibe "Erste Runde — Bewertung folgt.".)
+(Wenn der Nutzer bereits geantwortet hat — bewerte kurz: ✅/⚠️/❌. Beim ersten Mal — schreibe "Erste Runde — Bewertung folgt.")
 
 RECHTSGRUNDLAGE:
 ${b.laws}
@@ -109,6 +114,11 @@ REGELN:
 
   return `Ты — тренажёр допроса для ${b.code}. Процессуальный статус пользователя: ${statusRu}. Язык: русский.
 
+ВАЖНО ПО ФОРМАТИРОВАНИЮ:
+- Используй ТОЛЬКО одинарные звёздочки для жирного: *Текст* — не **Текст**.
+- Для списков используй "•" и эмодзи.
+- Никаких markdown-таблиц.
+
 РОЛЬ: Реалистичная симуляция допроса. Отвечай СТРОГО в формате:
 
 🎭 Следователь:
@@ -120,7 +130,7 @@ REGELN:
 • 🛡️ Правильная стратегия: 2-3 безопасные формулировки со ссылками на нормы
 
 📊 Оценка вашего прошлого ответа:
-(Если пользователь уже отвечал — оцени кратко: ✅/⚠️/❌, что было верно/неверно. В первый раз — напиши "Первый раунд — оценка будет дальше.".)
+(Если пользователь уже отвечал — оцени кратко: ✅/⚠️/❌. В первый раз — напиши "Первый раунд — оценка будет дальше.")
 
 ПРАВОВАЯ БАЗА:
 ${b.laws}
@@ -157,7 +167,7 @@ bot.command('start', async (ctx) => {
   );
 });
 
-// Выбор юрисдикции → меню статусов
+// Выбор юрисдикции
 bot.callbackQuery(/^jur:(KZ|RU|DE)$/, async (ctx) => {
   const jur = ctx.match[1];
   sessions.set(ctx.from.id, { jurisdiction: jur, status: null, incident: null, history: [] });
@@ -196,7 +206,7 @@ bot.callbackQuery(/^jur:(KZ|RU|DE)$/, async (ctx) => {
   });
 });
 
-// Выбор статуса → запрос инцидента
+// Выбор статуса
 bot.callbackQuery(/^st:(witness|suspect|accused|victim|plaintiff|defendant)$/, async (ctx) => {
   const status = ctx.match[1];
   const sess = sessions.get(ctx.from.id);
@@ -246,7 +256,7 @@ bot.command('help', async (ctx) => {
   );
 });
 
-// /finish — финальная оценка
+// /finish
 bot.command('finish', async (ctx) => {
   const sess = sessions.get(ctx.from.id);
   if (!sess || !sess.incident) {
@@ -275,7 +285,7 @@ bot.command('finish', async (ctx) => {
   }
 });
 
-// /export — сохранение в TXT
+// /export
 bot.command('export', async (ctx) => {
   const userId = ctx.from.id;
   const sess = sessions.get(userId);
@@ -370,27 +380,49 @@ bot.on('message:text', async (ctx) => {
     });
     const answer = response.choices[0].message.content;
     sess.history.push({ role: 'assistant', content: answer });
-    await sendLong(ctx, answer);
+    await sendLong(ctx, answer, 'Markdown');
   } catch (e) {
     console.error('AI error:', e);
     await ctx.reply('Ошибка ИИ. Попробуйте позже. / KI-Fehler.');
   }
 });
 
-// Отправка длинных сообщений
+// ============ ОТПРАВКА ДЛИННЫХ СООБЩЕНИЙ ============
+// Конвертирует **text** в *text* (правильный синтаксис Telegram Legacy Markdown)
+function cleanForTelegram(text) {
+  // Заменяем **bold** на *bold* (Telegram Legacy Markdown)
+  let cleaned = text.replace(/\*\*([^*]+?)\*\*/g, '*$1*');
+  // Заменяем __underline__ на _italic_ (Telegram поддерживает _italic_, не __underline__)
+  cleaned = cleaned.replace(/__([^_]+?)__/g, '_$1_');
+  return cleaned;
+}
+
 async function sendLong(ctx, text, parseMode) {
   const MAX = 4000;
+  const cleaned = parseMode === 'Markdown' ? cleanForTelegram(text) : text;
   const opts = parseMode ? { parse_mode: parseMode } : {};
-  if (text.length <= MAX) return ctx.reply(text, opts);
-  let i = 0;
-  while (i < text.length) {
-    let end = i + MAX;
-    if (end < text.length) {
-      const nl = text.lastIndexOf('\n', end);
-      if (nl > i) end = nl;
+
+  // Разбиваем на части по MAX символов
+  const parts = [];
+  let remaining = cleaned;
+
+  while (remaining.length > MAX) {
+    let end = remaining.lastIndexOf('\n\n', MAX);
+    if (end < MAX / 2) end = remaining.lastIndexOf('\n', MAX);
+    if (end < MAX / 2) end = MAX;
+    parts.push(remaining.slice(0, end));
+    remaining = remaining.slice(end).trim();
+  }
+  if (remaining) parts.push(remaining);
+
+  for (const part of parts) {
+    try {
+      await ctx.reply(part, opts);
+    } catch (e) {
+      // Fallback: если Markdown сломан — отправляем без parse_mode
+      console.warn('Markdown parse error, sending plain:', e.message);
+      await ctx.reply(part);
     }
-    await ctx.reply(text.slice(i, end), opts);
-    i = end;
   }
 }
 
