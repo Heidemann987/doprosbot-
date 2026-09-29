@@ -1,4 +1,4 @@
-{
+
   "name": "doprosbot",
   "version": "1.0.0",
   "description": "Dopros Trainer — тренажёр допроса",
@@ -16,4 +16,3 @@
   "engines": {
     "node": ">=18"
   }
-}
