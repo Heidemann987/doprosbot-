@@ -1,8 +1,7 @@
-// bot.js — Dopros Trainer (multilingual, status, evaluation, TXT export, fixed Markdown)
-const { Bot, InlineKeyboard, InputFile } = require('grammy');
+// bot.js — Dopros Trainer v2 (DE/CH/AT + KZ/RU, разбор после ответа, два режима)
+const { Bot, InlineKeyboard } = require('grammy');
 const OpenAI = require('openai');
 const express = require('express');
-const fs = require('fs');
 
 // ============ CONFIG ============
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
@@ -17,141 +16,223 @@ const ai = new OpenAI({
   baseURL: 'https://openrouter.ai/api/v1'
 });
 
-// ============ STATUS LABELS ============
+// ============ STATUS ============
 const STATUS = {
-  witness:   { ru: 'Свидетель', de: 'Zeuge' },
-  suspect:   { ru: 'Подозреваемый', de: 'Beschuldigter' },
-  accused:   { ru: 'Обвиняемый', de: 'Angeklagter' },
-  victim:    { ru: 'Потерпевший', de: 'Geschädigter' },
-  plaintiff: { ru: 'Истец', de: 'Kläger' },
-  defendant: { ru: 'Ответчик', de: 'Beklagter' }
+  witness:    { ru: 'Свидетель',    de: 'Zeuge' },
+  suspect:    { ru: 'Подозреваемый', de: 'Beschuldigter' },
+  accused:    { ru: 'Обвиняемый',   de: 'Angeklagter' },
+  victim:     { ru: 'Потерпевший',  de: 'Geschädigter' },
+  plaintiff:  { ru: 'Истец',        de: 'Kläger' },
+  defendant:  { ru: 'Ответчик',     de: 'Beklagter' }
 };
 
-// ============ SYSTEM PROMPTS ============
-function buildPrompt(jur, status) {
-  const statusRu = STATUS[status]?.ru || 'Свидетель';
-  const statusDe = STATUS[status]?.de || 'Zeuge';
+// ============ JURISDICTIONS ============
+const JUR = {
+  KZ: { name: 'Казахстан',  lang: 'ru' },
+  RU: { name: 'Россия',     lang: 'ru' },
+  DE: { name: 'Deutschland', lang: 'de' }
+};
 
-  const base = {
-    KZ: {
-      code: 'Республика Казахстан',
-      laws: `- Конституция РК, ст. 77 п. 7 — право не свидетельствовать против себя, супруга и близких родственников
-- Конституция РК, ст. 77 п. 6 — обвиняемый не обязан доказывать свою невиновность
-- Конституция РК, ст. 77 п. 8 — сомнения толкуются в пользу обвиняемого
-- Конституция РК, ст. 77 п. 9 — незаконные доказательства не имеют силы
-- УПК РК, ст. 28 — освобождение от обязанности давать показания
-- УПК РК, ст. 64 — права подозреваемого
-- УПК РК, ст. 65 — права свидетеля, имеющего право на защиту
-- УПК РК, ст. 69 — права обвиняемого
-- УПК РК, ст. 210, 215, 216, 535 — правила допроса
-- ГПК РК, ст. 46, 202
-- КоАП РК, ст. 744`
-    },
-    RU: {
-      code: 'Российская Федерация',
-      laws: `- Конституция РФ, ст. 51 — право не свидетельствовать против себя и близких
-- Конституция РФ, ст. 49 — презумпция невиновности
-- Конституция РФ, ст. 50 — недопустимость незаконных доказательств
-- УПК РФ, ст. 46 — права подозреваемого
-- УПК РФ, ст. 47 — права обвиняемого
-- УПК РФ, ст. 56 — права свидетеля
-- УПК РФ, ст. 189, 190 — правила допроса
-- УПК РФ, ст. 191, 425 — допрос несовершеннолетнего
-- ГПК РФ, ст. 35, 69, 177
-- КоАП РФ, ст. 25.1`
-    },
-    DE: {
-      code: 'Bundesrepublik Deutschland',
-      laws: `- Grundgesetz, Art. 1 — Menschenwürde
-- Grundgesetz, Art. 2 — allgemeine Handlungsfreiheit
-- Grundgesetz, Art. 20 Abs. 3 — Rechtsstaatsprinzip
-- StPO § 136 — Belehrung des Beschuldigten
-- StPO § 136a — Verbot von Folter, Täuschung, Ermüdung, Zwang
-- StPO § 163a — Vernehmung des Beschuldigten
-- StPO § 55 — Auskunftsverweigerungsrecht
-- StPO § 52 — Zeugnisverweigerungsrecht (Angehörige)
-- StPO § 58 — Vernehmung von Zeugen
-- StPO § 70 — Folgen der Zeugnisverweigerung
-- JGG §§ 67, 70 — Jugendstrafrecht
-- ZPO §§ 138, 141, 373, 395
-- OWiG §§ 55, 67, 71`
-    }
-  };
+// ============ РАЗРЕШЁННЫЕ СТАТЬИ (жёсткий список) ============
+const ALLOWED_LAWS = {
+  KZ: [
+    'Конституция РК, ст. 77 п. 6', 'Конституция РК, ст. 77 п. 7',
+    'Конституция РК, ст. 77 п. 8', 'Конституция РК, ст. 77 п. 9',
+    'УПК РК, ст. 28', 'УПК РК, ст. 64', 'УПК РК, ст. 65',
+    'УПК РК, ст. 69', 'УПК РК, ст. 210', 'УПК РК, ст. 215',
+    'УПК РК, ст. 216', 'УПК РК, ст. 535',
+    'ГПК РК, ст. 46', 'ГПК РК, ст. 202', 'КоАП РК, ст. 744'
+  ],
+  RU: [
+    'Конституция РФ, ст. 49', 'Конституция РФ, ст. 50', 'Конституция РФ, ст. 51',
+    'УПК РФ, ст. 46', 'УПК РФ, ст. 47', 'УПК РФ, ст. 56',
+    'УПК РФ, ст. 189', 'УПК РФ, ст. 190', 'УПК РФ, ст. 191',
+    'УПК РФ, ст. 425', 'ГПК РФ, ст. 35', 'ГПК РФ, ст. 69',
+    'ГПК РФ, ст. 177', 'КоАП РФ, ст. 25.1'
+  ],
+  DE: [
+    'Grundgesetz, Art. 1', 'Grundgesetz, Art. 2', 'Grundgesetz, Art. 20 Abs. 3',
+    'StPO § 136', 'StPO § 136a', 'StPO § 163a', 'StPO § 52',
+    'StPO § 55', 'StPO § 58', 'StPO § 70',
+    'JGG §§ 67, 70', 'ZPO §§ 138, 141', 'OWiG §§ 55, 67, 71'
+  ]
+};
 
-  const b = base[jur];
+// ============ PROMPT — только ВОПРОС следователя ============
+function buildQuestionPrompt(jur, status, lang, mode, incident, history) {
+  const lawsList = ALLOWED_LAWS[jur].map(l => '- ' + l).join('\n');
+  const statusText = lang === 'de' ? STATUS[status].de : STATUS[status].ru;
 
-  if (jur === 'DE') {
-    return `Du bist ein Verhör-Trainer für die ${b.code}. Verfahrensstatus des Nutzers: ${statusDe}. Sprache: Deutsch.
+  if (lang === 'de') {
+    return `Du bist Ermittler in einem Verhör in ${JUR[jur].name}. Verfahrensstatus: ${statusText}. Modus: ${mode === 'exam' ? 'Prüfung' : 'Anfänger'}.
 
-WICHTIG ZUR FORMATIERUNG:
-- Verwende AUSSCHLIESSLICH einfache Sternchen für Fett: *Text* — nicht **Text**.
-- Für Aufzählungen nutze "•" und Emojis.
-- Keine Markdown-Tabellen.
+VORFALL:
+${incident}
 
-ROLLE: Realistische Verhörsimulation. Antworte STRIKT in diesem Format:
+BISHERIGER DIALOG:
+${history}
 
-🎭 Ermittler:
-(Realistische Frage oder Aussage des Ermittlers, passend zum Status "${statusDe}". Nur auf Deutsch.)
+DEINE AUFGABE: Stelle die NÄCHSTE Frage als Ermittler. NUR die Frage — keine Analyse, kein Kommentar, keine Bewertung.
 
-💡 Trainer-Anwalt:
-• 🎯 Analyse der Falle: Ziel der Frage und Risiko
-• ⚠️ Gefährlicher Fehler: Wie man NICHT antworten sollte
-• 🛡️ Richtige Strategie: 2-3 sichere Formulierungen mit Normverweisen
+FORMAT:
+🎭 Ermittler: [Frage auf Deutsch]
 
-📊 Bewertung Ihrer letzten Antwort:
-(Wenn der Nutzer bereits geantwortet hat — bewerte kurz: ✅/⚠️/❌. Beim ersten Mal — schreibe "Erste Runde — Bewertung folgt.")
-
-RECHTSGRUNDLAGE:
-${b.laws}
+VERBOTENE ARTIKEL (nutze NUR diese):
+${lawsList}
 
 REGELN:
-1. Nur auf die gestellte Frage antworten lehren.
-2. Unterscheide "Ich erinnere mich nicht" und Schweigerecht.
-3. Der Verfahrensstatus ist "${statusDe}" — berücksichtige ihn.
-4. Keine Rechtsberatung zur Sache.
-5. Antworte NUR auf Deutsch.`;
+- Nur EINE Frage.
+- Auf Deutsch.
+- Ohne Analyse, ohne Bewertung, ohne Trainer-Kommentar.
+- Realistisch, passend zum Status "${statusText}".`;
   }
 
-  return `Ты — тренажёр допроса для ${b.code}. Процессуальный статус пользователя: ${statusRu}. Язык: русский.
+  return `Ты — следователь на допросе в ${JUR[jur].name}. Процессуальный статус: ${statusText}. Режим: ${mode === 'exam' ? 'экзамен' : 'новичок'}.
 
-ВАЖНО ПО ФОРМАТИРОВАНИЮ:
-- Используй ТОЛЬКО одинарные звёздочки для жирного: *Текст* — не **Текст**.
-- Для списков используй "•" и эмодзи.
-- Никаких markdown-таблиц.
+ИНЦИДЕНТ:
+${incident}
 
-РОЛЬ: Реалистичная симуляция допроса. Отвечай СТРОГО в формате:
+ПРЕДЫДУЩИЙ ДИАЛОГ:
+${history}
 
-🎭 Следователь:
-(Реалистичный вопрос или реплика, соответствующие статусу "${statusRu}". Только на русском.)
+ТВОЯ ЗАДАЧА: задать СЛЕДУЮЩИЙ вопрос как следователь. ТОЛЬКО вопрос — без анализа, без комментариев, без оценки.
 
-💡 Тренер-адвокат:
-• 🎯 Разбор ловушки: цель вопроса и риск
-• ⚠️ Опасная ошибка: как отвечать НЕЛЬЗЯ
-• 🛡️ Правильная стратегия: 2-3 безопасные формулировки со ссылками на нормы
+ФОРМАТ:
+🎭 Следователь: [вопрос на русском]
 
-📊 Оценка вашего прошлого ответа:
-(Если пользователь уже отвечал — оцени кратко: ✅/⚠️/❌. В первый раз — напиши "Первый раунд — оценка будет дальше.")
-
-ПРАВОВАЯ БАЗА:
-${b.laws}
+ЗАПРЕЩЁННЫЕ СТАТЬИ (используй ТОЛЬКО эти):
+${lawsList}
 
 ПРАВИЛА:
-1. Учи отвечать только на заданный вопрос.
-2. Различай "не помню" и отказ от показаний.
-3. Статус "${statusRu}" — учитывай его.
-4. Не давай консультаций по существу дела.
-5. Отвечай ТОЛЬКО на русском.`;
+- Только ОДИН вопрос.
+- На русском.
+- Без анализа, без оценки, без комментариев тренера.
+- Реалистично, под статус "${statusText}".`;
+}
+
+// ============ PROMPT — только РАЗБОР ответа ============
+function buildEvaluationPrompt(jur, status, lang, mode, incident, history) {
+  const lawsList = ALLOWED_LAWS[jur].map(l => '- ' + l).join('\n');
+  const statusText = lang === 'de' ? STATUS[status].de : STATUS[status].ru;
+
+  if (lang === 'de') {
+    return `Du bist Trainer-Anwalt. Bewerte die letzte Antwort des Nutzers im Verhör.
+
+Status: ${statusText}. Modus: ${mode === 'exam' ? 'Prüfung' : 'Anfänger'}.
+
+VORFALL:
+${incident}
+
+DIALOG BISHER:
+${history}
+
+DEINE AUFGABE: Bewerte die LETZTE Antwort des Nutzers und gib den ETALON.
+
+FORMAT (streng einhalten):
+
+📊 Bewertung: [✅ / ⚠️ / ❌]
+
+⚠️ Fehler: [was falsch war — oder "keine"]
+
+🎯 Etalon: [korrekte Formulierung, die der Nutzer hätte sagen sollen]
+
+📚 Artikel: [genaue Artikel aus der Liste unten]
+
+💬 Kurz: [1-2 Sätze warum]
+
+VERBOTENE ARTIKEL (nutze NUR diese):
+${lawsList}
+
+REGELN:
+- Bewerte nur die LETZTE Antwort des Nutzers.
+- Etalon = ideale Formulierung.
+- Nur Artikel aus der Liste.
+- Auf Deutsch.
+- Wenn Nutzer nichts geantwortet hat — schreibe "⚠️ Keine Antwort."`;
+  }
+
+  return `Ты — тренер-адвокат. Оцени последний ответ пользователя на допросе.
+
+Статус: ${statusText}. Режим: ${mode === 'exam' ? 'экзамен' : 'новичок'}.
+
+ИНЦИДЕНТ:
+${incident}
+
+ДИАЛОГ:
+${history}
+
+ТВОЯ ЗАДАЧА: оцени ПОСЛЕДНИЙ ответ пользователя и дай ЭТАЛОН.
+
+ФОРМАТ (строго):
+
+📊 Оценка: [✅ / ⚠️ / ❌]
+
+⚠️ Ошибка: [что не так — или "нет"]
+
+🎯 Эталон: [правильная формулировка, которую стоило сказать]
+
+📚 Статьи: [точные статьи из списка ниже]
+
+💬 Коротко: [1-2 предложения почему]
+
+ЗАПРЕЩЁННЫЕ СТАТЬИ (используй ТОЛЬКО эти):
+${lawsList}
+
+ПРАВИЛА:
+- Оценивай только ПОСЛЕДНИЙ ответ пользователя.
+- Эталон — идеальная формулировка.
+- Только статьи из списка.
+- На русском.
+- Если пользователь не ответил — напиши "⚠️ Ответа не было."`;
+}
+
+// ============ PROMPT — подсказка ============
+function buildHintPrompt(jur, status, lang, incident, history) {
+  const lawsList = ALLOWED_LAWS[jur].map(l => '- ' + l).join('\n');
+  const statusText = lang === 'de' ? STATUS[status].de : STATUS[status].ru;
+
+  if (lang === 'de') {
+    return `Du bist Trainer-Anwalt. Der Nutzer bittet um eine HINWEIS für die aktuelle Frage.
+
+Status: ${statusText}.
+VORFALL: ${incident}
+DIALOG: ${history}
+
+Gib 1-2 Sätze, die dem Nutzer helfen, aber NICHT die komplette Antwort verraten.
+
+FORMAT:
+💡 Hinweis: [kurz, unter 300 Zeichen]
+
+Erlaubte Artikel: ${lawsList}
+
+Auf Deutsch.`;
+  }
+
+  return `Ты — тренер-адвокат. Пользователь просит ПОДСКАЗКУ к текущему вопросу.
+
+Статус: ${statusText}.
+ИНЦИДЕНТ: ${incident}
+ДИАЛОГ: ${history}
+
+Дай 1-2 предложения, которые помогут, но НЕ раскроют полный ответ.
+
+ФОРМАТ:
+💡 Подсказка: [коротко, до 300 символов]
+
+Разрешённые статьи: ${lawsList}
+
+На русском.`;
 }
 
 // ============ SESSIONS ============
+// { userId, jur, mode, status, incident, history: [], currentQuestion }
 const sessions = new Map();
 
 // ============ BOT ============
 const bot = new Bot(BOT_TOKEN);
-
 bot.catch((err) => console.error('Bot error:', err));
 
-// /start
+// ============ /start ============
 bot.command('start', async (ctx) => {
   sessions.delete(ctx.from.id);
 
@@ -162,51 +243,69 @@ bot.command('start', async (ctx) => {
 
   await ctx.reply(
     '⚖️ *Тренажёр допроса / Verhör-Trainer*\n\n' +
+    '⚠️ Это тренажёр, не замена адвоката.\n\n' +
     'Выберите юрисдикцию / Wählen Sie die Jurisdiktion:',
     { parse_mode: 'Markdown', reply_markup: kb }
   );
 });
 
-// Выбор юрисдикции
+// ============ ВЫБОР ЮРИСДИКЦИИ → РЕЖИМ ============
 bot.callbackQuery(/^jur:(KZ|RU|DE)$/, async (ctx) => {
   const jur = ctx.match[1];
-  sessions.set(ctx.from.id, { jurisdiction: jur, status: null, incident: null, history: [] });
+  sessions.set(ctx.from.id, {
+    jur, mode: null, status: null, incident: null, history: [], currentQuestion: null
+  });
 
   await ctx.answerCallbackQuery();
 
-  if (jur === 'DE') {
-    const kb = new InlineKeyboard()
-      .text('👤 Zeuge', 'st:witness').row()
+  const isDE = jur === 'DE';
+  const kb = new InlineKeyboard()
+    .text(isDE ? '🎓 Anfänger' : '🎓 Новичок', 'mode:beginner').row()
+    .text(isDE ? '📝 Prüfung' : '📝 Экзамен', 'mode:exam');
+
+  await ctx.reply(
+    isDE
+      ? '🎓 *Anfänger* — mit Hinweisen.\n📝 *Prüfung* — ohne Hinweise, strenger.\n\nWählen Sie den Modus:'
+      : '🎓 *Новичок* — с подсказками.\n📝 *Экзамен* — без подсказок, строже.\n\nВыберите режим:',
+    { parse_mode: 'Markdown', reply_markup: kb }
+  );
+});
+
+// ============ ВЫБОР РЕЖИМА → СТАТУС ============
+bot.callbackQuery(/^mode:(beginner|exam)$/, async (ctx) => {
+  const mode = ctx.match[1];
+  const sess = sessions.get(ctx.from.id);
+  if (!sess) return ctx.answerCallbackQuery({ text: 'Начните с /start' });
+
+  sess.mode = mode;
+  await ctx.answerCallbackQuery();
+
+  const isDE = sess.jur === 'DE';
+
+  const kb = new InlineKeyboard();
+  if (isDE) {
+    kb.text('👤 Zeuge', 'st:witness').row()
       .text('🚨 Beschuldigter', 'st:suspect').row()
       .text('⚖️ Angeklagter', 'st:accused').row()
       .text('🛡️ Geschädigter', 'st:victim').row()
       .text('📋 Kläger', 'st:plaintiff').row()
       .text('📋 Beklagter', 'st:defendant');
-
-    await ctx.reply('🇩🇪 Deutschland\n\n*Wählen Sie Ihren Verfahrensstatus:*', {
-      parse_mode: 'Markdown',
-      reply_markup: kb
-    });
-    return;
+  } else {
+    kb.text('👤 Свидетель', 'st:witness').row()
+      .text('🚨 Подозреваемый', 'st:suspect').row()
+      .text('⚖️ Обвиняемый', 'st:accused').row()
+      .text('🛡️ Потерпевший', 'st:victim').row()
+      .text('📋 Истец', 'st:plaintiff').row()
+      .text('📋 Ответчик', 'st:defendant');
   }
 
-  const kb = new InlineKeyboard()
-    .text('👤 Свидетель', 'st:witness').row()
-    .text('🚨 Подозреваемый', 'st:suspect').row()
-    .text('⚖️ Обвиняемый', 'st:accused').row()
-    .text('🛡️ Потерпевший', 'st:victim').row()
-    .text('📋 Истец', 'st:plaintiff').row()
-    .text('📋 Ответчик', 'st:defendant');
-
-  const title = jur === 'KZ' ? '🇰🇿 Казахстан' : '🇷🇺 Россия';
-
-  await ctx.reply(`${title}\n\n*Выберите свой процессуальный статус:*`, {
-    parse_mode: 'Markdown',
-    reply_markup: kb
-  });
+  await ctx.reply(
+    isDE ? '*Wählen Sie Ihren Verfahrensstatus:*' : '*Выберите свой процессуальный статус:*',
+    { parse_mode: 'Markdown', reply_markup: kb }
+  );
 });
 
-// Выбор статуса
+// ============ СТАТУС → ИНЦИДЕНТ ============
 bot.callbackQuery(/^st:(witness|suspect|accused|victim|plaintiff|defendant)$/, async (ctx) => {
   const status = ctx.match[1];
   const sess = sessions.get(ctx.from.id);
@@ -215,222 +314,208 @@ bot.callbackQuery(/^st:(witness|suspect|accused|victim|plaintiff|defendant)$/, a
   sess.status = status;
   await ctx.answerCallbackQuery();
 
-  const jur = sess.jurisdiction;
-
-  if (jur === 'DE') {
-    await ctx.reply(
-      `🇩🇪 Deutschland · *${STATUS[status].de}*\n\n` +
-      `*Beschreiben Sie Ihren Vorfall ausführlich.*\n\n` +
-      `Bitte keine Namen, Adressen, Telefonnummern.`,
-      { parse_mode: 'Markdown' }
-    );
-    return;
-  }
-
-  const title = jur === 'KZ' ? '🇰🇿 Казахстан' : '🇷🇺 Россия';
+  const isDE = sess.jur === 'DE';
+  const statusText = isDE ? STATUS[status].de : STATUS[status].ru;
 
   await ctx.reply(
-    `${title} · *${STATUS[status].ru}*\n\n` +
-    `*Опишите подробно свой инцидент.*\n\n` +
-    `Не указывайте ФИО, адрес, ИИН, телефоны.`,
+    isDE
+      ? `*${statusText}*\n\n*Beschreiben Sie Ihren Vorfall ausführlich:*\n\n• Was ist passiert?\n• Wann?\n• Wer war beteiligt?\n• Was haben Sie getan?\n\n⚠️ Keine persönlichen Daten.`
+      : `*${statusText}*\n\n*Опишите подробно свой инцидент:*\n\n• Что произошло?\n• Когда?\n• Кто участвовал?\n• Что делали вы?\n\n⚠️ Без личных данных.`,
     { parse_mode: 'Markdown' }
   );
 });
 
-// /reset
+// ============ /reset ============
 bot.command('reset', async (ctx) => {
   sessions.delete(ctx.from.id);
-  await ctx.reply('Сессия сброшена. / Sitzung zurückgesetzt.\n\nНапишите /start.');
+  await ctx.reply('Сброшено. / Zurückgesetzt.\n\nНапишите /start.');
 });
 
-// /help
+// ============ /help ============
 bot.command('help', async (ctx) => {
   await ctx.reply(
-    '⚖️ *Dopros Trainer — Hilfe / Помощь*\n\n' +
-    '• /start — начать / beginnen\n' +
-    '• /reset — сбросить / zurücksetzen\n' +
-    '• /finish — завершить тренировку / Training beenden\n' +
-    '• /export — сохранить отчёт / Bericht speichern\n' +
-    '• /help — справка / Hilfe',
+    '⚖️ *Тренажёр допроса*\n\n' +
+    '• /start — начать\n' +
+    '• /reset — сбросить\n' +
+    '• /finish — итог тренировки\n' +
+    '• /help — справка\n\n' +
+    '⚙️ Как работает:\n' +
+    '1. Выбираете юрисдикцию и режим\n' +
+    '2. Описываете инцидент\n' +
+    '3. Отвечаете на вопросы следователя\n' +
+    '4. После каждого ответа — разбор с эталоном',
     { parse_mode: 'Markdown' }
   );
 });
 
-// /finish
+// ============ /finish ============
 bot.command('finish', async (ctx) => {
   const sess = sessions.get(ctx.from.id);
   if (!sess || !sess.incident) {
-    return ctx.reply('Сначала начните тренировку: /start');
+    return ctx.reply('Нет активной сессии. / Keine aktive Sitzung.');
   }
 
-  const finishPrompt = sess.jurisdiction === 'DE'
-    ? 'Beende die Trainingssitzung. Gib eine abschließende Bewertung: Stärken, Schwächen, Empfehlungen. Kurz und konkret.'
-    : 'Заверши тренировку. Дай итоговую оценку: сильные стороны, слабые стороны, рекомендации. Кратко и по делу.';
+  const isDE = sess.jur === 'DE';
+  const summaryPrompt = isDE
+    ? 'Fasse die Trainingssitzung zusammen. Bewerte: Stärken, Schwächen, was zu wiederholen. Kurz.'
+    : 'Подведи итог тренировки: сильные стороны, слабые, что повторить. Кратко.';
 
-  sess.history.push({ role: 'user', content: finishPrompt });
+  const messages = [
+    { role: 'system', content: isDE
+      ? `Du bist Trainer-Anwalt. Status: ${STATUS[sess.status].de}.`
+      : `Ты тренер-адвокат. Статус: ${STATUS[sess.status].ru}.`
+    },
+    ...sess.history,
+    { role: 'user', content: summaryPrompt }
+  ];
 
   try {
     await ctx.replyWithChatAction('typing');
-    const response = await ai.chat.completions.create({
-      model: MODEL,
-      messages: sess.history,
-      temperature: 0.7,
-      max_tokens: 1500
+    const r = await ai.chat.completions.create({
+      model: MODEL, messages, temperature: 0.5, max_tokens: 1200
     });
-    const answer = response.choices[0].message.content;
-    await sendLong(ctx, '🎓 *ИТОГ / ERGEBNIS*\n\n' + answer, 'Markdown');
+    const answer = r.choices[0].message.content;
+    const title = isDE ? '🎓 *AUSWERTUNG*\n\n' : '🎓 *ИТОГ*\n\n';
+    await ctx.reply(title + answer, { parse_mode: 'Markdown' });
   } catch (e) {
     console.error(e);
-    await ctx.reply('Ошибка при получении итога.');
+    await ctx.reply('Ошибка. / Fehler.');
   }
 });
 
-// /export
-bot.command('export', async (ctx) => {
-  const userId = ctx.from.id;
-  const sess = sessions.get(userId);
-
-  if (!sess || !sess.incident) {
-    return ctx.reply('Нет активной сессии. Начните с /start');
+// ============ КНОПКА ПОДСКАЗКА ============
+bot.callbackQuery('hint', async (ctx) => {
+  const sess = sessions.get(ctx.from.id);
+  if (!sess) return ctx.answerCallbackQuery({ text: 'Начните с /start' });
+  if (sess.mode === 'exam') {
+    return ctx.answerCallbackQuery({ text: 'В режиме экзамена подсказки отключены', show_alert: true });
   }
 
-  await ctx.reply('📄 Готовлю файл... / Datei wird vorbereitet...');
+  await ctx.answerCallbackQuery();
+
+  const isDE = sess.jur === 'DE';
+  const histText = sess.history.map(m => (m.role === 'user' ? '👤 ' : '🤖 ') + m.content).join('\n\n');
 
   try {
-    let content = '';
-
-    content += '===========================================\n';
-    content += '       DOPROS TRAINER — TRAINING REPORT\n';
-    content += '===========================================\n\n';
-    content += 'Datum / Дата: ' + new Date().toISOString().slice(0, 19).replace('T', ' ') + '\n';
-    content += 'Jurisdiktion / Юрисдикция: ' + sess.jurisdiction + '\n';
-    content += 'Status / Статус: ' + (STATUS[sess.status]?.ru || '—') + ' / ' + (STATUS[sess.status]?.de || '—') + '\n\n';
-
-    content += '-------------------------------------------\n';
-    content += 'INCIDENT / ИНЦИДЕНТ:\n';
-    content += '-------------------------------------------\n';
-    content += (sess.incident || '—') + '\n\n';
-
-    content += '-------------------------------------------\n';
-    content += 'DIALOG / ДИАЛОГ:\n';
-    content += '-------------------------------------------\n\n';
-
-    sess.history.forEach((msg) => {
-      if (msg.role === 'system') return;
-      const label = msg.role === 'user' ? '► USER / ПОЛЬЗОВАТЕЛЬ' : '◆ TRAINER / ТРЕНЕР';
-      content += label + ':\n' + (msg.content || '') + '\n\n';
+    await ctx.replyWithChatAction('typing');
+    const r = await ai.chat.completions.create({
+      model: MODEL,
+      messages: [{ role: 'user', content: buildHintPrompt(sess.jur, sess.status, isDE ? 'de' : 'ru', sess.incident, histText) }],
+      temperature: 0.5,
+      max_tokens: 300
     });
-
-    content += '===========================================\n';
-    content += 'Dies ist Übungsmaterial, keine Rechtsberatung.\n';
-    content += 'Это тренировочный материал, не юридическая консультация.\n';
-    content += '===========================================\n';
-
-    const tmpPath = '/tmp/Dopros_Training_' + userId + '_' + Date.now() + '.txt';
-    fs.writeFileSync(tmpPath, content, 'utf8');
-
-    await ctx.replyWithDocument(new InputFile(tmpPath), {
-      caption: '📄 Ваша тренировка сохранена. / Ihre Trainingseinheit wurde gespeichert.'
-    });
-
-    fs.unlink(tmpPath, () => {});
+    const answer = r.choices[0].message.content;
+    await ctx.reply(answer, { parse_mode: 'Markdown' });
   } catch (e) {
-    console.error('Export error:', e);
-    await ctx.reply('Ошибка при создании файла. / Fehler beim Erstellen der Datei.');
+    console.error(e);
+    await ctx.reply('Ошибка подсказки.');
   }
 });
 
-// Основной обработчик
+// ============ ОСНОВНОЙ ОБРАБОТЧИК ============
 bot.on('message:text', async (ctx) => {
   const text = ctx.message.text;
   if (text.startsWith('/')) return;
 
-  const sess = sessions.get(ctx.from.id);
+  const userId = ctx.from.id;
+  const sess = sessions.get(userId);
+
   if (!sess) return ctx.reply('Начните с /start');
-  if (!sess.jurisdiction) return ctx.reply('Выберите юрисдикцию: /start');
-  if (!sess.status) return ctx.reply('Выберите процессуальный статус.');
+  if (!sess.jur) return ctx.reply('Выберите юрисдикцию: /start');
+  if (!sess.mode) return ctx.reply('Выберите режим: /start');
+  if (!sess.status) return ctx.reply('Выберите статус: /start');
+
+  const isDE = sess.jur === 'DE';
+
+  // ========== ПЕРВОЕ СООБЩЕНИЕ — ИНЦИДЕНТ ==========
   if (!sess.incident) {
     sess.incident = text;
-    sess.history = [
-      { role: 'system', content: buildPrompt(sess.jurisdiction, sess.status) },
-      {
-        role: 'user',
-        content: sess.jurisdiction === 'DE'
-          ? `Vorfall: ${text}\n\nBeginne das Training. Erste Frage als Ermittler + Kommentar des Trainer-Anwalts.`
-          : `Инцидент: ${text}\n\nНачни тренировку. Первый вопрос следователя + разбор тренера-адвоката.`
+    sess.history = [{ role: 'user', content: (isDE ? 'Vorfall: ' : 'Инцидент: ') + text }];
+
+    await ctx.reply(isDE ? '⏳ Erste Frage wird vorbereitet...' : '⏳ Готовлю первый вопрос...');
+
+    try {
+      await ctx.replyWithChatAction('typing');
+      const histText = sess.history.map(m => m.content).join('\n\n');
+      const r = await ai.chat.completions.create({
+        model: MODEL,
+        messages: [{ role: 'user', content: buildQuestionPrompt(sess.jur, sess.status, isDE ? 'de' : 'ru', sess.mode, sess.incident, histText) }],
+        temperature: 0.7, max_tokens: 500
+      });
+      const question = r.choices[0].message.content;
+      sess.currentQuestion = question;
+      sess.history.push({ role: 'assistant', content: question });
+
+      const kb = new InlineKeyboard();
+      if (sess.mode === 'beginner') {
+        kb.text(isDE ? '💡 Hinweis' : '💡 Подсказка', 'hint').row();
       }
-    ];
-  } else {
-    sess.history.push({ role: 'user', content: text });
-    const sys = sess.history[0];
-    const rest = sess.history.slice(1);
-    if (rest.length > 24) sess.history = [sys, ...rest.slice(-24)];
+      kb.text(isDE ? '🎓 Training beenden' : '🎓 Завершить тренировку', 'finish_action');
+
+      await ctx.reply(question, { parse_mode: 'Markdown', reply_markup: kb });
+    } catch (e) {
+      console.error('AI error:', e);
+      await ctx.reply('Ошибка ИИ. / KI-Fehler.');
+    }
+    return;
   }
 
-  const loading = sess.jurisdiction === 'DE' ? '⏳ Antwort wird vorbereitet...' : '⏳ Готовлю ответ...';
-  await ctx.reply(loading);
+  // ========== ПОЛЬЗОВАТЕЛЬ ОТВЕЧАЕТ ==========
+  sess.history.push({ role: 'user', content: text });
+
+  await ctx.reply(isDE ? '⏳ Analyse läuft...' : '⏳ Анализирую ответ...');
 
   try {
     await ctx.replyWithChatAction('typing');
-    const response = await ai.chat.completions.create({
+    const histText = sess.history.map(m => (m.role === 'user' ? '👤 ' : '🎭 ') + m.content).join('\n\n');
+
+    // 1) Разбор ответа
+    const evalRes = await ai.chat.completions.create({
       model: MODEL,
-      messages: sess.history,
-      temperature: 0.7,
-      max_tokens: 2000
+      messages: [{ role: 'user', content: buildEvaluationPrompt(sess.jur, sess.status, isDE ? 'de' : 'ru', sess.mode, sess.incident, histText) }],
+      temperature: 0.4, max_tokens: 700
     });
-    const answer = response.choices[0].message.content;
-    sess.history.push({ role: 'assistant', content: answer });
-    await sendLong(ctx, answer, 'Markdown');
+    const evaluation = evalRes.choices[0].message.content;
+
+    await ctx.reply(evaluation, { parse_mode: 'Markdown' });
+
+    // 2) Следующий вопрос
+    await ctx.replyWithChatAction('typing');
+    const histText2 = sess.history.map(m => (m.role === 'user' ? '👤 ' : '🎭 ') + m.content).join('\n\n') + '\n\n📊 Оценка была дана.';
+    const nextRes = await ai.chat.completions.create({
+      model: MODEL,
+      messages: [{ role: 'user', content: buildQuestionPrompt(sess.jur, sess.status, isDE ? 'de' : 'ru', sess.mode, sess.incident, histText2) }],
+      temperature: 0.7, max_tokens: 500
+    });
+    const nextQuestion = nextRes.choices[0].message.content;
+    sess.currentQuestion = nextQuestion;
+    sess.history.push({ role: 'assistant', content: nextQuestion });
+
+    const kb = new InlineKeyboard();
+    if (sess.mode === 'beginner') {
+      kb.text(isDE ? '💡 Hinweis' : '💡 Подсказка', 'hint').row();
+    }
+    kb.text(isDE ? '🎓 Training beenden' : '🎓 Завершить тренировку', 'finish_action');
+
+    await ctx.reply(nextQuestion, { parse_mode: 'Markdown', reply_markup: kb });
+
   } catch (e) {
     console.error('AI error:', e);
-    await ctx.reply('Ошибка ИИ. Попробуйте позже. / KI-Fehler.');
+    await ctx.reply('Ошибка ИИ. / KI-Fehler.');
   }
 });
 
-// ============ ОТПРАВКА ДЛИННЫХ СООБЩЕНИЙ ============
-// Конвертирует **text** в *text* (правильный синтаксис Telegram Legacy Markdown)
-function cleanForTelegram(text) {
-  // Заменяем **bold** на *bold* (Telegram Legacy Markdown)
-  let cleaned = text.replace(/\*\*([^*]+?)\*\*/g, '*$1*');
-  // Заменяем __underline__ на _italic_ (Telegram поддерживает _italic_, не __underline__)
-  cleaned = cleaned.replace(/__([^_]+?)__/g, '_$1_');
-  return cleaned;
-}
-
-async function sendLong(ctx, text, parseMode) {
-  const MAX = 4000;
-  const cleaned = parseMode === 'Markdown' ? cleanForTelegram(text) : text;
-  const opts = parseMode ? { parse_mode: parseMode } : {};
-
-  // Разбиваем на части по MAX символов
-  const parts = [];
-  let remaining = cleaned;
-
-  while (remaining.length > MAX) {
-    let end = remaining.lastIndexOf('\n\n', MAX);
-    if (end < MAX / 2) end = remaining.lastIndexOf('\n', MAX);
-    if (end < MAX / 2) end = MAX;
-    parts.push(remaining.slice(0, end));
-    remaining = remaining.slice(end).trim();
-  }
-  if (remaining) parts.push(remaining);
-
-  for (const part of parts) {
-    try {
-      await ctx.reply(part, opts);
-    } catch (e) {
-      // Fallback: если Markdown сломан — отправляем без parse_mode
-      console.warn('Markdown parse error, sending plain:', e.message);
-      await ctx.reply(part);
-    }
-  }
-}
+// ============ КНОПКА "ЗАВЕРШИТЬ" ============
+bot.callbackQuery('finish_action', async (ctx) => {
+  await ctx.answerCallbackQuery();
+  await ctx.reply('Отправьте /finish для итоговой оценки.');
+});
 
 // ============ START ============
-bot.start();
-console.log('🚀 Dopros Trainer started');
+bot.start({ drop_pending_updates: true });
+console.log('🚀 Dopros Trainer v2 started');
 
 const httpApp = express();
-httpApp.get('/', (req, res) => res.send('Dopros Trainer is running'));
+httpApp.get('/', (req, res) => res.send('Dopros Trainer v2 is running'));
 const PORT = process.env.PORT || 3000;
 httpApp.listen(PORT, () => console.log('HTTP server on port ' + PORT));
