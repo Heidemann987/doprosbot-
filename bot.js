@@ -1,4 +1,4 @@
-// bot.js — Dopros Trainer v4 (мини-RAG, жёсткие ограничения языка)
+// bot.js — Dopros Trainer v5 (мини-RAG + жёсткая привязка к юрисдикции)
 const { Bot, InlineKeyboard } = require('grammy');
 const OpenAI = require('openai');
 const express = require('express');
@@ -83,13 +83,12 @@ const STATUS = {
 };
 
 const JUR = {
-  KZ: { name: 'Казахстан',   lang: 'ru' },
-  RU: { name: 'Россия',      lang: 'ru' },
-  DE: { name: 'Deutschland', lang: 'de' }
+  KZ: { name: 'Казахстан',   lang: 'ru', laws: 'КоАП РК / УПК РК / ГПК РК / Конституция РК' },
+  RU: { name: 'Россия',      lang: 'ru', laws: 'КоАП РФ / УПК РФ / ГПК РФ / Конституция РФ' },
+  DE: { name: 'Deutschland', lang: 'de', laws: 'StPO / ZPO / OWiG / Grundgesetz' }
 };
 
-// ============ LANGUAGE GUARD ============
-// Проверяет ответ AI: если много английских символов в русской юрисдикции — режем
+// ============ LANGUAGE DETECTION ============
 function detectLanguage(text) {
   const latinCount = (text.match(/[a-zA-Z]/g) || []).length;
   const cyrillicCount = (text.match(/[а-яА-ЯёЁ]/g) || []).length;
@@ -98,18 +97,28 @@ function detectLanguage(text) {
   return latinCount > cyrillicCount ? 'latin' : 'cyrillic';
 }
 
-function enforceLanguage(text, expectedLang) {
-  const detected = detectLanguage(text);
-  // Если ожидается русский, но ответ латиницей — вернуть null
-  if (expectedLang === 'ru' && detected === 'latin') return null;
-  if (expectedLang === 'de' && detected === 'cyrillic') return null;
-  return text;
+// Проверка: цитирует ли ответ статью из запрещённой юрисдикции
+function hasWrongJurisdiction(text, jur) {
+  const textLower = text.toLowerCase();
+  if (jur === 'KZ') {
+    // Ищем упоминания РФ или Германии
+    if (/конституц[а-я]+ рф|упк рф|гпк рф|коап рф|ст\. ?\d+ ?упк рф/.test(textLower)) return true;
+    if (/stpo|grundgesetz|zpo|owig/.test(textLower)) return true;
+  }
+  if (jur === 'RU') {
+    if (/конституц[а-я]+ рк|упк рк|гпк рк|коап рк/.test(textLower)) return true;
+    if (/stpo|grundgesetz|zpo|owig/.test(textLower)) return true;
+  }
+  if (jur === 'DE') {
+    if (/упк рф|упк рк|конституц|гпк|коап/.test(textLower)) return true;
+  }
+  return false;
 }
 
 // ============ BUILD LAWS CONTEXT ============
 function buildLawsContext(jur, articles) {
   if (!articles.length) {
-    return '(нет найденных статей / keine Artikel gefunden)';
+    return `(нет найденных статей из ${JUR[jur].laws})`;
   }
   return articles.map(a => `\n### ${a.title}\n${a.text}\n`).join('\n');
 }
@@ -118,15 +127,19 @@ function buildLawsContext(jur, articles) {
 function buildQuestionPrompt(jur, status, lang, incident, history, relevantLaws) {
   const statusText = lang === 'de' ? STATUS[status].de : STATUS[status].ru;
   const lawsContext = buildLawsContext(jur, relevantLaws);
+  const country = JUR[jur].name;
+  const lawsList = JUR[jur].laws;
 
   if (lang === 'de') {
-    return `⚠️ PFLICHT: Antworte AUSSCHLIESSLICH auf DEUTSCH.
-⚠️ VERBOTEN: Englisch, Russisch, jede andere Sprache.
-⚠️ VERBOTEN: Analyse, Bewertung, Kommentare, dein Denken zeigen.
-⚠️ NUR EINE FRAGE.
+    return `⚠️ STRIKT: Antworte NUR auf DEUTSCH. Verboten: Englisch, Russisch.
+⚠️ STRIKT: NUR Gesetze von ${country}: ${lawsList}.
+⚠️ VERBOTEN: StPO, Grundgesetz — außer bei Deutschland.
+⚠️ VERBOTEN: УПК, Конституция, ГПК, КоАП — bei Deutschland.
+⚠️ VERBOTEN: Analyse, dein Denken, Fakten erfinden.
+⚠️ NUR EINE Frage.
 
-Du bist Ermittler in einem Verhör in ${JUR[jur].name}.
-Status: ${statusText}.
+Land: ${country}
+Status: ${statusText}
 
 VORFALL:
 ${incident}
@@ -134,22 +147,23 @@ ${incident}
 DIALOG:
 ${history}
 
-GESETZE:
+GESETZE VON ${country.toUpperCase()} (NUR DIESE):
 ${lawsContext}
 
-FORMAT (exakt einhalten):
+FORMAT (exakt):
 🎭 Ermittler: [eine Frage auf Deutsch]
 
-DEINE ANTWORT BESTEHT NUR AUS DIESEM FORMAT. KEIN TEXT DAVOR ODER DANACH.`;
+DEINE ANTWORT: NUR DIESE FORMAT-ZEILE. KEIN TEXT DAVOR ODER DANACH.`;
   }
 
-  return `⚠️ ОБЯЗАТЕЛЬНО: отвечай ТОЛЬКО на РУССКОМ языке.
-⚠️ ЗАПРЕЩЕНО: английский, немецкий, любой другой язык.
-⚠️ ЗАПРЕЩЕНО: анализ, оценка, комментарии, показ рассуждений.
-⚠️ ТОЛЬКО ОДИН ВОПРОС.
+  return `⚠️ СТРОГО: отвечай ТОЛЬКО на РУССКОМ.
+⚠️ СТРОГО: только законы ${country.toUpperCase()}: ${lawsList}.
+⚠️ ЗАПРЕЩЕНО: цитировать Конституцию РФ, УПК РФ, ГПК РФ, КоАП РФ, StPO, Grundgesetz.
+⚠️ ЗАПРЕЩЕНО: анализ, "The user...", показ рассуждений, выдумывание фактов.
+⚠️ ТОЛЬКО ОДИН вопрос.
 
-Ты — следователь на допросе в ${JUR[jur].name}.
-Статус: ${statusText}.
+Страна: ${country}
+Статус: ${statusText}
 
 ИНЦИДЕНТ:
 ${incident}
@@ -157,28 +171,31 @@ ${incident}
 ДИАЛОГ:
 ${history}
 
-СТАТЬИ:
+СТАТЬИ ${country.toUpperCase()} (ТОЛЬКО ЭТИ):
 ${lawsContext}
 
 ФОРМАТ (строго):
 🎭 Следователь: [один вопрос на русском]
 
-ТВОЙ ОТВЕТ — ТОЛЬКО ЭТОТ ФОРМАТ. НИКАКОГО ТЕКСТА ДО ИЛИ ПОСЛЕ.`;
+ТВОЙ ОТВЕТ: ТОЛЬКО ЭТА СТРОКА ФОРМАТА. НИКАКОГО ТЕКСТА ДО ИЛИ ПОСЛЕ.`;
 }
 
 // ============ EVALUATION PROMPT ============
 function buildEvaluationPrompt(jur, status, lang, incident, history, relevantLaws) {
   const statusText = lang === 'de' ? STATUS[status].de : STATUS[status].ru;
   const lawsContext = buildLawsContext(jur, relevantLaws);
+  const country = JUR[jur].name;
+  const lawsList = JUR[jur].laws;
 
   if (lang === 'de') {
-    return `⚠️ PFLICHT: Antworte AUSSCHLIESSLICH auf DEUTSCH.
-⚠️ VERBOTEN: Englisch, Russisch, jede andere Sprache.
-⚠️ VERBOTEN: Analyse der Rolle, Denken zeigen, "The user...".
-⚠️ NUR das Format unten.
+    return `⚠️ STRIKT: NUR DEUTSCH. Kein Englisch, kein Russisch.
+⚠️ STRIKT: NUR Gesetze von ${country}: ${lawsList}.
+⚠️ VERBOTEN: Zitate aus УПК, Конституция, ГПК, КоАП — nur bei Russland/Kasachstan.
+⚠️ VERBOTEN: Analyse deiner Rolle, "The user...", Fakten erfinden.
+⚠️ NUR Format unten.
 
-Du bist Trainer-Anwalt.
-Status: ${statusText}.
+Land: ${country}
+Status: ${statusText}
 
 VORFALL:
 ${incident}
@@ -186,10 +203,10 @@ ${incident}
 DIALOG:
 ${history}
 
-GESETZE:
+GESETZE VON ${country.toUpperCase()} (NUR DIESE):
 ${lawsContext}
 
-FORMAT (exakt einhalten):
+FORMAT (exakt):
 
 📊 Bewertung: [✅ / ⚠️ / ❌]
 
@@ -197,20 +214,21 @@ FORMAT (exakt einhalten):
 
 🎯 Etalon: «[korrekte Formulierung]»
 
-📚 Artikel: [genaue Titel aus GESETZE]
+📚 Artikel: [genaue Titel aus GESETZE ${country.toUpperCase()} — NUR von ${country}]
 
 💬 Kurz: [1-2 Sätze]
 
-DEINE ANTWORT BESTEHT NUR AUS DIESEM FORMAT. KEIN TEXT DAVOR ODER DANACH.`;
+DEINE ANTWORT: NUR DIESES FORMAT. KEIN TEXT DAVOR ODER DANACH.`;
   }
 
-  return `⚠️ ОБЯЗАТЕЛЬНО: отвечай ТОЛЬКО на РУССКОМ языке.
-⚠️ ЗАПРЕЩЕНО: английский, немецкий, любой другой язык.
-⚠️ ЗАПРЕЩЕНО: анализ роли, показ рассуждений, "The user...".
+  return `⚠️ СТРОГО: только РУССКИЙ. Никакого английского, никакого немецкого.
+⚠️ СТРОГО: только законы ${country.toUpperCase()}: ${lawsList}.
+⚠️ ЗАПРЕЩЕНО: ссылаться на УПК РФ, Конституцию РФ, ГПК РФ, КоАП РФ, StPO, Grundgesetz.
+⚠️ ЗАПРЕЩЕНО: анализ роли, "The user...", выдумывание фактов.
 ⚠️ ТОЛЬКО формат ниже.
 
-Ты — тренер-адвокат.
-Статус: ${statusText}.
+Страна: ${country}
+Статус: ${statusText}
 
 ИНЦИДЕНТ:
 ${incident}
@@ -218,7 +236,7 @@ ${incident}
 ДИАЛОГ:
 ${history}
 
-СТАТЬИ:
+СТАТЬИ ${country.toUpperCase()} (ТОЛЬКО ЭТИ):
 ${lawsContext}
 
 ФОРМАТ (строго):
@@ -229,22 +247,23 @@ ${lawsContext}
 
 🎯 Эталон: «[правильная формулировка]»
 
-📚 Статьи: [точные названия из СТАТЬИ]
+📚 Статьи: [точные названия из СТАТЬИ ${country.toUpperCase()} — только ${country}]
 
 💬 Коротко: [1-2 предложения]
 
-ТВОЙ ОТВЕТ — ТОЛЬКО ЭТОТ ФОРМАТ. НИКАКОГО ТЕКСТА ДО ИЛИ ПОСЛЕ.`;
+ТВОЙ ОТВЕТ: ТОЛЬКО ЭТОТ ФОРМАТ. НИКАКОГО ТЕКСТА ДО ИЛИ ПОСЛЕ.`;
 }
 
 // ============ HINT PROMPT ============
 function buildHintPrompt(jur, status, lang, incident, history, relevantLaws) {
   const statusText = lang === 'de' ? STATUS[status].de : STATUS[status].ru;
   const lawsContext = buildLawsContext(jur, relevantLaws);
+  const country = JUR[jur].name;
 
   if (lang === 'de') {
-    return `⚠️ NUR DEUTSCH. Max 2 Sätze. KEINE Analyse.
+    return `⚠️ NUR DEUTSCH. ⚠️ NUR Gesetze von ${country}. Max 2 Sätze.
 
-Status: ${statusText}.
+Land: ${country}. Status: ${statusText}.
 VORFALL: ${incident}
 DIALOG: ${history}
 
@@ -255,9 +274,9 @@ FORMAT:
 💡 Hinweis: [max 2 Sätze auf Deutsch]`;
   }
 
-  return `⚠️ ТОЛЬКО РУССКИЙ. Максимум 2 предложения. БЕЗ анализа.
+  return `⚠️ ТОЛЬКО РУССКИЙ. ⚠️ ТОЛЬКО законы ${country.toUpperCase()}. Максимум 2 предложения.
 
-Статус: ${statusText}.
+Страна: ${country}. Статус: ${statusText}.
 ИНЦИДЕНТ: ${incident}
 ДИАЛОГ: ${history}
 
@@ -265,7 +284,7 @@ FORMAT:
 ${lawsContext}
 
 ФОРМАТ:
-💡 Подсказка: [максимум 2 предложения на русском]`;
+💡 Подсказка: [максимум 2 предложения]`;
 }
 
 // ============ SESSIONS ============
@@ -275,38 +294,57 @@ const sessions = new Map();
 const bot = new Bot(BOT_TOKEN);
 bot.catch((err) => console.error('Bot error:', err));
 
-// ============ AI CALL WRAPPER with retry ============
-async function callAI(prompt, maxTokens, expectedLang) {
-  const response = await ai.chat.completions.create({
-    model: MODEL,
-    messages: [{ role: 'user', content: prompt }],
-    temperature: 0.6,
-    max_tokens: maxTokens
-  });
-
-  let text = response.choices[0].message.content || '';
-
-  // Проверка языка
-  const langOk = enforceLanguage(text, expectedLang);
-  if (!langOk) {
-    // Повторный запрос с ещё более жёстким требованием
-    console.warn(`⚠️ Language violation detected. Retrying...`);
-    const retryResponse = await ai.chat.completions.create({
+// ============ AI CALL with language + jurisdiction guard ============
+async function callAI(prompt, maxTokens, expectedLang, jur) {
+  let text = '';
+  try {
+    const response = await ai.chat.completions.create({
       model: MODEL,
-      messages: [
-        { role: 'user', content: prompt },
-        { role: 'assistant', content: text },
-        {
-          role: 'user',
-          content: expectedLang === 'de'
-            ? 'FALSCH! Antworte NUR auf Deutsch. Kein Englisch. Nur das Format.'
-            : 'НЕВЕРНО! Отвечай ТОЛЬКО на русском. Никакого английского. Только формат.'
-        }
-      ],
-      temperature: 0.3,
+      messages: [{ role: 'user', content: prompt }],
+      temperature: 0.5,
       max_tokens: maxTokens
     });
-    text = retryResponse.choices[0].message.content || '';
+    text = response.choices[0].message.content || '';
+  } catch (e) {
+    console.error('AI request failed:', e.message);
+    throw e;
+  }
+
+  // Проверка языка
+  const lang = detectLanguage(text);
+  const langWrong = (expectedLang === 'ru' && lang === 'latin') ||
+                    (expectedLang === 'de' && lang === 'cyrillic');
+
+  // Проверка юрисдикции
+  const jurWrong = hasWrongJurisdiction(text, jur);
+
+  if (langWrong || jurWrong) {
+    console.warn(`⚠️ Guard triggered: lang=${lang}, jurWrong=${jurWrong}. Retrying...`);
+
+    try {
+      const retryResponse = await ai.chat.completions.create({
+        model: MODEL,
+        messages: [
+          { role: 'user', content: prompt },
+          { role: 'assistant', content: text },
+          {
+            role: 'user',
+            content: expectedLang === 'de'
+              ? `FALSCH! Nur auf DEUTSCH. Nur Gesetze von ${JUR[jur].name}. KEIN Englisch. KEINE anderen Länder. Nur das Format.`
+              : `НЕВЕРНО! Только на РУССКОМ. Только законы ${JUR[jur].name.toUpperCase()}. Никакого английского. Никаких статей РФ/Германии. Только формат.`
+          }
+        ],
+        temperature: 0.2,
+        max_tokens: maxTokens
+      });
+      const retryText = retryResponse.choices[0].message.content || '';
+      // Если ретрай лучше — берём его
+      if (!hasWrongJurisdiction(retryText, jur)) {
+        text = retryText;
+      }
+    } catch (e) {
+      console.error('Retry failed:', e.message);
+    }
   }
 
   return text;
@@ -419,7 +457,7 @@ bot.command('help', async (ctx) => {
     '• /reset — сбросить\n' +
     '• /finish — итог тренировки\n' +
     '• /help — справка\n\n' +
-    '📚 Используются статьи из официальных источников.',
+    '📚 Статьи берутся из законов выбранной юрисдикции.',
     { parse_mode: 'Markdown' }
   );
 });
@@ -433,34 +471,37 @@ bot.command('finish', async (ctx) => {
 
   const isDE = sess.jur === 'DE';
   const expectedLang = isDE ? 'de' : 'ru';
+  const country = JUR[sess.jur].name;
 
   const allText = sess.incident + ' ' + sess.history.map(m => m.content).join(' ');
   const relevant = findRelevantArticles(sess.jur, allText, 5);
 
   const summaryPrompt = isDE
-    ? `⚠️ NUR DEUTSCH. Fasse die Trainingssitzung zusammen: Stärken, Schwächen, was zu wiederholen. Kurz.
+    ? `⚠️ NUR DEUTSCH. ⚠️ NUR Gesetze von ${country}.
+Fasse zusammen: Stärken, Schwächen, was zu wiederholen. Kurz.
 
 VORFALL: ${sess.incident}
 DIALOG: ${sess.history.map(m => m.content).join('\n\n')}
 
-GESETZE:
+GESETZE ${country.toUpperCase()}:
 ${buildLawsContext(sess.jur, relevant)}`
-    : `⚠️ ТОЛЬКО РУССКИЙ. Подведи итог тренировки: сильные стороны, слабые, что повторить. Кратко.
+    : `⚠️ ТОЛЬКО РУССКИЙ. ⚠️ ТОЛЬКО законы ${country.toUpperCase()}.
+Подведи итог: сильные стороны, слабые, что повторить. Кратко.
 
 ИНЦИДЕНТ: ${sess.incident}
 ДИАЛОГ: ${sess.history.map(m => m.content).join('\n\n')}
 
-СТАТЬИ:
+СТАТЬИ ${country.toUpperCase()}:
 ${buildLawsContext(sess.jur, relevant)}`;
 
   try {
     await ctx.replyWithChatAction('typing');
-    const answer = await callAI(summaryPrompt, 1200, expectedLang);
+    const answer = await callAI(summaryPrompt, 1200, expectedLang, sess.jur);
     const title = isDE ? '🎓 *AUSWERTUNG*\n\n' : '🎓 *ИТОГ*\n\n';
     await ctx.reply(title + answer, { parse_mode: 'Markdown' });
   } catch (e) {
     console.error(e);
-    await ctx.reply('Ошибка. / Fehler.');
+    await ctx.reply('Ошибка. Попробуйте ещё раз. / Fehler.');
   }
 });
 
@@ -486,7 +527,8 @@ bot.callbackQuery('hint', async (ctx) => {
     const answer = await callAI(
       buildHintPrompt(sess.jur, sess.status, expectedLang, sess.incident, histText, relevant),
       300,
-      expectedLang
+      expectedLang,
+      sess.jur
     );
     await ctx.reply(answer, { parse_mode: 'Markdown' });
   } catch (e) {
@@ -519,7 +561,7 @@ bot.on('message:text', async (ctx) => {
     await ctx.reply(isDE ? '⏳ Erste Frage wird vorbereitet...' : '⏳ Готовлю первый вопрос...');
 
     const relevant = findRelevantArticles(sess.jur, text, 5);
-    console.log(`🔍 RAG: найдено ${relevant.length} статей`);
+    console.log(`🔍 RAG: найдено ${relevant.length} статей для юрисдикции ${sess.jur}`);
 
     try {
       await ctx.replyWithChatAction('typing');
@@ -527,7 +569,8 @@ bot.on('message:text', async (ctx) => {
       const question = await callAI(
         buildQuestionPrompt(sess.jur, sess.status, expectedLang, sess.incident, histText, relevant),
         500,
-        expectedLang
+        expectedLang,
+        sess.jur
       );
       sess.history.push({ role: 'assistant', content: question });
 
@@ -540,7 +583,7 @@ bot.on('message:text', async (ctx) => {
       await ctx.reply(question, { parse_mode: 'Markdown', reply_markup: kb });
     } catch (e) {
       console.error('AI error:', e);
-      await ctx.reply('Ошибка ИИ. / KI-Fehler.');
+      await ctx.reply('Ошибка ИИ. Попробуйте /start заново.');
     }
     return;
   }
@@ -553,7 +596,7 @@ bot.on('message:text', async (ctx) => {
   const lastQuestion = sess.history.filter(m => m.role === 'assistant').slice(-1)[0]?.content || '';
   const query = lastQuestion + ' ' + text;
   const relevant = findRelevantArticles(sess.jur, query, 5);
-  console.log(`🔍 RAG: найдено ${relevant.length} статей для оценки`);
+  console.log(`🔍 RAG: найдено ${relevant.length} статей для оценки в ${sess.jur}`);
 
   try {
     await ctx.replyWithChatAction('typing');
@@ -563,7 +606,8 @@ bot.on('message:text', async (ctx) => {
     const evaluation = await callAI(
       buildEvaluationPrompt(sess.jur, sess.status, expectedLang, sess.incident, histText, relevant),
       700,
-      expectedLang
+      expectedLang,
+      sess.jur
     );
     await ctx.reply(evaluation, { parse_mode: 'Markdown' });
 
@@ -576,7 +620,8 @@ bot.on('message:text', async (ctx) => {
     const nextQuestion = await callAI(
       buildQuestionPrompt(sess.jur, sess.status, expectedLang, sess.incident, histText2, nextRelevant),
       500,
-      expectedLang
+      expectedLang,
+      sess.jur
     );
     sess.history.push({ role: 'assistant', content: nextQuestion });
 
@@ -590,7 +635,9 @@ bot.on('message:text', async (ctx) => {
 
   } catch (e) {
     console.error('AI error:', e);
-    await ctx.reply('Ошибка ИИ. / KI-Fehler.');
+    await ctx.reply(isDE
+      ? 'KI-Fehler. Senden Sie /start zum Neustart.'
+      : 'Ошибка ИИ. Отправьте /start для перезапуска.');
   }
 });
 
@@ -604,9 +651,9 @@ bot.callbackQuery('finish_action', async (ctx) => {
 
 // ============ START ============
 bot.start({ drop_pending_updates: true });
-console.log('🚀 Dopros Trainer v4 (жёсткие ограничения языка) started');
+console.log('🚀 Dopros Trainer v5 (жёсткая привязка к юрисдикции) started');
 
 const httpApp = express();
-httpApp.get('/', (req, res) => res.send('Dopros Trainer v4 running'));
+httpApp.get('/', (req, res) => res.send('Dopros Trainer v5 running'));
 const PORT = process.env.PORT || 3000;
 httpApp.listen(PORT, () => console.log('HTTP server on port ' + PORT));
