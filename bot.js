@@ -1,7 +1,9 @@
-// bot.js — Dopros Trainer v2 (DE/CH/AT + KZ/RU, разбор после ответа, два режима)
+// bot.js — Dopros Trainer v3 (мини-RAG: KZ, RU, DE)
 const { Bot, InlineKeyboard } = require('grammy');
 const OpenAI = require('openai');
 const express = require('express');
+const fs = require('fs');
+const path = require('path');
 
 // ============ CONFIG ============
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
@@ -16,6 +18,61 @@ const ai = new OpenAI({
   baseURL: 'https://openrouter.ai/api/v1'
 });
 
+// ============ LOAD LAWS ============
+function loadLaws(jur) {
+  try {
+    const filePath = path.join(__dirname, `laws_${jur}.json`);
+    const data = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+    return data.articles || [];
+  } catch (e) {
+    console.error(`Failed to load laws_${jur}.json:`, e.message);
+    return [];
+  }
+}
+
+const LAWS = {
+  KZ: loadLaws('KZ'),
+  RU: loadLaws('RU'),
+  DE: loadLaws('DE')
+};
+
+console.log('📚 Laws loaded:', {
+  KZ: LAWS.KZ.length,
+  RU: LAWS.RU.length,
+  DE: LAWS.DE.length
+});
+
+// ============ MINI-RAG SEARCH ============
+// Простой поиск: сколько ключевых слов из запроса встречается в keywords статьи
+function findRelevantArticles(jur, query, limit = 5) {
+  const articles = LAWS[jur] || [];
+  if (!articles.length) return [];
+
+  const queryLower = query.toLowerCase();
+  const queryWords = queryLower
+    .replace(/[^\w\sа-яёäöüß]/gi, ' ')
+    .split(/\s+/)
+    .filter(w => w.length > 3);
+
+  const scored = articles.map(art => {
+    let score = 0;
+    for (const kw of art.keywords) {
+      const kwLower = kw.toLowerCase();
+      if (queryLower.includes(kwLower)) score += 3;
+      for (const qw of queryWords) {
+        if (kwLower.includes(qw) || qw.includes(kwLower)) score += 1;
+      }
+    }
+    return { art, score };
+  });
+
+  return scored
+    .filter(s => s.score > 0)
+    .sort((a, b) => b.score - a.score)
+    .slice(0, limit)
+    .map(s => s.art);
+}
+
 // ============ STATUS ============
 const STATUS = {
   witness:    { ru: 'Свидетель',    de: 'Zeuge' },
@@ -26,45 +83,29 @@ const STATUS = {
   defendant:  { ru: 'Ответчик',     de: 'Beklagter' }
 };
 
-// ============ JURISDICTIONS ============
 const JUR = {
-  KZ: { name: 'Казахстан',  lang: 'ru' },
-  RU: { name: 'Россия',     lang: 'ru' },
+  KZ: { name: 'Казахстан',   lang: 'ru' },
+  RU: { name: 'Россия',      lang: 'ru' },
   DE: { name: 'Deutschland', lang: 'de' }
 };
 
-// ============ РАЗРЕШЁННЫЕ СТАТЬИ (жёсткий список) ============
-const ALLOWED_LAWS = {
-  KZ: [
-    'Конституция РК, ст. 77 п. 6', 'Конституция РК, ст. 77 п. 7',
-    'Конституция РК, ст. 77 п. 8', 'Конституция РК, ст. 77 п. 9',
-    'УПК РК, ст. 28', 'УПК РК, ст. 64', 'УПК РК, ст. 65',
-    'УПК РК, ст. 69', 'УПК РК, ст. 210', 'УПК РК, ст. 215',
-    'УПК РК, ст. 216', 'УПК РК, ст. 535',
-    'ГПК РК, ст. 46', 'ГПК РК, ст. 202', 'КоАП РК, ст. 744'
-  ],
-  RU: [
-    'Конституция РФ, ст. 49', 'Конституция РФ, ст. 50', 'Конституция РФ, ст. 51',
-    'УПК РФ, ст. 46', 'УПК РФ, ст. 47', 'УПК РФ, ст. 56',
-    'УПК РФ, ст. 189', 'УПК РФ, ст. 190', 'УПК РФ, ст. 191',
-    'УПК РФ, ст. 425', 'ГПК РФ, ст. 35', 'ГПК РФ, ст. 69',
-    'ГПК РФ, ст. 177', 'КоАП РФ, ст. 25.1'
-  ],
-  DE: [
-    'Grundgesetz, Art. 1', 'Grundgesetz, Art. 2', 'Grundgesetz, Art. 20 Abs. 3',
-    'StPO § 136', 'StPO § 136a', 'StPO § 163a', 'StPO § 52',
-    'StPO § 55', 'StPO § 58', 'StPO § 70',
-    'JGG §§ 67, 70', 'ZPO §§ 138, 141', 'OWiG §§ 55, 67, 71'
-  ]
-};
+// ============ BUILD CONTEXT FROM RAG ============
+function buildLawsContext(jur, articles) {
+  if (!articles.length) {
+    return '(keine spezifischen Artikel gefunden / статьи не найдены)';
+  }
+  return articles.map(a =>
+    `\n### ${a.title}\n${a.text}\n`
+  ).join('\n');
+}
 
-// ============ PROMPT — только ВОПРОС следователя ============
-function buildQuestionPrompt(jur, status, lang, mode, incident, history) {
-  const lawsList = ALLOWED_LAWS[jur].map(l => '- ' + l).join('\n');
+// ============ QUESTION PROMPT ============
+function buildQuestionPrompt(jur, status, lang, incident, history, relevantLaws) {
   const statusText = lang === 'de' ? STATUS[status].de : STATUS[status].ru;
+  const lawsContext = buildLawsContext(jur, relevantLaws);
 
   if (lang === 'de') {
-    return `Du bist Ermittler in einem Verhör in ${JUR[jur].name}. Verfahrensstatus: ${statusText}. Modus: ${mode === 'exam' ? 'Prüfung' : 'Anfänger'}.
+    return `Du bist Ermittler in einem Verhör in ${JUR[jur].name}. Verfahrensstatus: ${statusText}.
 
 VORFALL:
 ${incident}
@@ -72,22 +113,22 @@ ${incident}
 BISHERIGER DIALOG:
 ${history}
 
-DEINE AUFGABE: Stelle die NÄCHSTE Frage als Ermittler. NUR die Frage — keine Analyse, kein Kommentar, keine Bewertung.
+RELEVANTE GESETZE (nutze NUR diese):
+${lawsContext}
+
+DEINE AUFGABE: Stelle die NÄCHSTE Frage als Ermittler. NUR die Frage — keine Analyse, kein Kommentar.
 
 FORMAT:
 🎭 Ermittler: [Frage auf Deutsch]
 
-VERBOTENE ARTIKEL (nutze NUR diese):
-${lawsList}
-
 REGELN:
 - Nur EINE Frage.
 - Auf Deutsch.
-- Ohne Analyse, ohne Bewertung, ohne Trainer-Kommentar.
+- Ohne Analyse, ohne Bewertung.
 - Realistisch, passend zum Status "${statusText}".`;
   }
 
-  return `Ты — следователь на допросе в ${JUR[jur].name}. Процессуальный статус: ${statusText}. Режим: ${mode === 'exam' ? 'экзамен' : 'новичок'}.
+  return `Ты — следователь на допросе в ${JUR[jur].name}. Процессуальный статус: ${statusText}.
 
 ИНЦИДЕНТ:
 ${incident}
@@ -95,65 +136,61 @@ ${incident}
 ПРЕДЫДУЩИЙ ДИАЛОГ:
 ${history}
 
-ТВОЯ ЗАДАЧА: задать СЛЕДУЮЩИЙ вопрос как следователь. ТОЛЬКО вопрос — без анализа, без комментариев, без оценки.
+РЕЛЕВАНТНЫЕ СТАТЬИ (используй ТОЛЬКО эти):
+${lawsContext}
+
+ТВОЯ ЗАДАЧА: задать СЛЕДУЮЩИЙ вопрос как следователь. ТОЛЬКО вопрос — без анализа.
 
 ФОРМАТ:
 🎭 Следователь: [вопрос на русском]
 
-ЗАПРЕЩЁННЫЕ СТАТЬИ (используй ТОЛЬКО эти):
-${lawsList}
-
 ПРАВИЛА:
 - Только ОДИН вопрос.
 - На русском.
-- Без анализа, без оценки, без комментариев тренера.
+- Без анализа, без оценки.
 - Реалистично, под статус "${statusText}".`;
 }
 
-// ============ PROMPT — только РАЗБОР ответа ============
-function buildEvaluationPrompt(jur, status, lang, mode, incident, history) {
-  const lawsList = ALLOWED_LAWS[jur].map(l => '- ' + l).join('\n');
+// ============ EVALUATION PROMPT ============
+function buildEvaluationPrompt(jur, status, lang, incident, history, relevantLaws) {
   const statusText = lang === 'de' ? STATUS[status].de : STATUS[status].ru;
+  const lawsContext = buildLawsContext(jur, relevantLaws);
 
   if (lang === 'de') {
-    return `Du bist Trainer-Anwalt. Bewerte die letzte Antwort des Nutzers im Verhör.
+    return `Du bist Trainer-Anwalt. Bewerte die letzte Antwort des Nutzers.
 
-Status: ${statusText}. Modus: ${mode === 'exam' ? 'Prüfung' : 'Anfänger'}.
+Status: ${statusText}.
 
 VORFALL:
 ${incident}
 
-DIALOG BISHER:
+DIALOG:
 ${history}
 
-DEINE AUFGABE: Bewerte die LETZTE Antwort des Nutzers und gib den ETALON.
+RELEVANTE GESETZE (zitiere NUR diese):
+${lawsContext}
 
-FORMAT (streng einhalten):
+FORMAT:
 
 📊 Bewertung: [✅ / ⚠️ / ❌]
 
 ⚠️ Fehler: [was falsch war — oder "keine"]
 
-🎯 Etalon: [korrekte Formulierung, die der Nutzer hätte sagen sollen]
+🎯 Etalon: [korrekte Formulierung]
 
-📚 Artikel: [genaue Artikel aus der Liste unten]
+📚 Artikel: [genaue Titel der Artikel oben]
 
-💬 Kurz: [1-2 Sätze warum]
-
-VERBOTENE ARTIKEL (nutze NUR diese):
-${lawsList}
+💬 Kurz: [1-2 Sätze]
 
 REGELN:
-- Bewerte nur die LETZTE Antwort des Nutzers.
-- Etalon = ideale Formulierung.
-- Nur Artikel aus der Liste.
-- Auf Deutsch.
-- Wenn Nutzer nichts geantwortet hat — schreibe "⚠️ Keine Antwort."`;
+- Bewerte nur die LETZTE Antwort.
+- Zitiere NUR Artikel aus der Liste oben.
+- Auf Deutsch.`;
   }
 
-  return `Ты — тренер-адвокат. Оцени последний ответ пользователя на допросе.
+  return `Ты — тренер-адвокат. Оцени последний ответ пользователя.
 
-Статус: ${statusText}. Режим: ${mode === 'exam' ? 'экзамен' : 'новичок'}.
+Статус: ${statusText}.
 
 ИНЦИДЕНТ:
 ${incident}
@@ -161,71 +198,68 @@ ${incident}
 ДИАЛОГ:
 ${history}
 
-ТВОЯ ЗАДАЧА: оцени ПОСЛЕДНИЙ ответ пользователя и дай ЭТАЛОН.
+РЕЛЕВАНТНЫЕ СТАТЬИ (цитируй ТОЛЬКО эти):
+${lawsContext}
 
-ФОРМАТ (строго):
+ФОРМАТ:
 
 📊 Оценка: [✅ / ⚠️ / ❌]
 
 ⚠️ Ошибка: [что не так — или "нет"]
 
-🎯 Эталон: [правильная формулировка, которую стоило сказать]
+🎯 Эталон: [правильная формулировка]
 
-📚 Статьи: [точные статьи из списка ниже]
+📚 Статьи: [точные заголовки из списка выше]
 
-💬 Коротко: [1-2 предложения почему]
-
-ЗАПРЕЩЁННЫЕ СТАТЬИ (используй ТОЛЬКО эти):
-${lawsList}
+💬 Коротко: [1-2 предложения]
 
 ПРАВИЛА:
-- Оценивай только ПОСЛЕДНИЙ ответ пользователя.
-- Эталон — идеальная формулировка.
-- Только статьи из списка.
-- На русском.
-- Если пользователь не ответил — напиши "⚠️ Ответа не было."`;
+- Оценивай только ПОСЛЕДНИЙ ответ.
+- Цитируй ТОЛЬКО статьи из списка выше.
+- На русском.`;
 }
 
-// ============ PROMPT — подсказка ============
-function buildHintPrompt(jur, status, lang, incident, history) {
-  const lawsList = ALLOWED_LAWS[jur].map(l => '- ' + l).join('\n');
+// ============ HINT PROMPT ============
+function buildHintPrompt(jur, status, lang, incident, history, relevantLaws) {
   const statusText = lang === 'de' ? STATUS[status].de : STATUS[status].ru;
+  const lawsContext = buildLawsContext(jur, relevantLaws);
 
   if (lang === 'de') {
-    return `Du bist Trainer-Anwalt. Der Nutzer bittet um eine HINWEIS für die aktuelle Frage.
+    return `Du bist Trainer-Anwalt. Der Nutzer bittet um einen HINWEIS.
 
 Status: ${statusText}.
 VORFALL: ${incident}
 DIALOG: ${history}
 
-Gib 1-2 Sätze, die dem Nutzer helfen, aber NICHT die komplette Antwort verraten.
+RELEVANTE GESETZE:
+${lawsContext}
+
+Gib 1-2 Sätze Hinweis — NICHT die komplette Antwort.
 
 FORMAT:
 💡 Hinweis: [kurz, unter 300 Zeichen]
 
-Erlaubte Artikel: ${lawsList}
-
 Auf Deutsch.`;
   }
 
-  return `Ты — тренер-адвокат. Пользователь просит ПОДСКАЗКУ к текущему вопросу.
+  return `Ты — тренер-адвокат. Пользователь просит ПОДСКАЗКУ.
 
 Статус: ${statusText}.
 ИНЦИДЕНТ: ${incident}
 ДИАЛОГ: ${history}
 
-Дай 1-2 предложения, которые помогут, но НЕ раскроют полный ответ.
+РЕЛЕВАНТНЫЕ СТАТЬИ:
+${lawsContext}
+
+Дай 1-2 предложения — НЕ полный ответ.
 
 ФОРМАТ:
 💡 Подсказка: [коротко, до 300 символов]
-
-Разрешённые статьи: ${lawsList}
 
 На русском.`;
 }
 
 // ============ SESSIONS ============
-// { userId, jur, mode, status, incident, history: [], currentQuestion }
 const sessions = new Map();
 
 // ============ BOT ============
@@ -249,11 +283,11 @@ bot.command('start', async (ctx) => {
   );
 });
 
-// ============ ВЫБОР ЮРИСДИКЦИИ → РЕЖИМ ============
+// ============ JURISDICTION ============
 bot.callbackQuery(/^jur:(KZ|RU|DE)$/, async (ctx) => {
   const jur = ctx.match[1];
   sessions.set(ctx.from.id, {
-    jur, mode: null, status: null, incident: null, history: [], currentQuestion: null
+    jur, mode: null, status: null, incident: null, history: []
   });
 
   await ctx.answerCallbackQuery();
@@ -265,13 +299,13 @@ bot.callbackQuery(/^jur:(KZ|RU|DE)$/, async (ctx) => {
 
   await ctx.reply(
     isDE
-      ? '🎓 *Anfänger* — mit Hinweisen.\n📝 *Prüfung* — ohne Hinweise, strenger.\n\nWählen Sie den Modus:'
-      : '🎓 *Новичок* — с подсказками.\n📝 *Экзамен* — без подсказок, строже.\n\nВыберите режим:',
+      ? '🎓 *Anfänger* — mit Hinweisen.\n📝 *Prüfung* — ohne Hinweise.\n\nWählen Sie den Modus:'
+      : '🎓 *Новичок* — с подсказками.\n📝 *Экзамен* — без подсказок.\n\nВыберите режим:',
     { parse_mode: 'Markdown', reply_markup: kb }
   );
 });
 
-// ============ ВЫБОР РЕЖИМА → СТАТУС ============
+// ============ MODE ============
 bot.callbackQuery(/^mode:(beginner|exam)$/, async (ctx) => {
   const mode = ctx.match[1];
   const sess = sessions.get(ctx.from.id);
@@ -281,8 +315,8 @@ bot.callbackQuery(/^mode:(beginner|exam)$/, async (ctx) => {
   await ctx.answerCallbackQuery();
 
   const isDE = sess.jur === 'DE';
-
   const kb = new InlineKeyboard();
+
   if (isDE) {
     kb.text('👤 Zeuge', 'st:witness').row()
       .text('🚨 Beschuldigter', 'st:suspect').row()
@@ -305,7 +339,7 @@ bot.callbackQuery(/^mode:(beginner|exam)$/, async (ctx) => {
   );
 });
 
-// ============ СТАТУС → ИНЦИДЕНТ ============
+// ============ STATUS ============
 bot.callbackQuery(/^st:(witness|suspect|accused|victim|plaintiff|defendant)$/, async (ctx) => {
   const status = ctx.match[1];
   const sess = sessions.get(ctx.from.id);
@@ -339,11 +373,7 @@ bot.command('help', async (ctx) => {
     '• /reset — сбросить\n' +
     '• /finish — итог тренировки\n' +
     '• /help — справка\n\n' +
-    '⚙️ Как работает:\n' +
-    '1. Выбираете юрисдикцию и режим\n' +
-    '2. Описываете инцидент\n' +
-    '3. Отвечаете на вопросы следователя\n' +
-    '4. После каждого ответа — разбор с эталоном',
+    '📚 Используются статьи из официальных источников.',
     { parse_mode: 'Markdown' }
   );
 });
@@ -357,8 +387,12 @@ bot.command('finish', async (ctx) => {
 
   const isDE = sess.jur === 'DE';
   const summaryPrompt = isDE
-    ? 'Fasse die Trainingssitzung zusammen. Bewerte: Stärken, Schwächen, was zu wiederholen. Kurz.'
-    : 'Подведи итог тренировки: сильные стороны, слабые, что повторить. Кратко.';
+    ? 'Fasse die Trainingssitzung zusammen: Stärken, Schwächen, was zu wiederholen. Kurz.'
+    : 'Подведи итог: сильные стороны, слабые, что повторить. Кратко.';
+
+  // Найти статьи по всему инциденту + истории
+  const allText = sess.incident + ' ' + sess.history.map(m => m.content).join(' ');
+  const relevant = findRelevantArticles(sess.jur, allText, 5);
 
   const messages = [
     { role: 'system', content: isDE
@@ -366,7 +400,7 @@ bot.command('finish', async (ctx) => {
       : `Ты тренер-адвокат. Статус: ${STATUS[sess.status].ru}.`
     },
     ...sess.history,
-    { role: 'user', content: summaryPrompt }
+    { role: 'user', content: summaryPrompt + '\n\nRelevante Artikel:\n' + buildLawsContext(sess.jur, relevant) }
   ];
 
   try {
@@ -383,7 +417,7 @@ bot.command('finish', async (ctx) => {
   }
 });
 
-// ============ КНОПКА ПОДСКАЗКА ============
+// ============ HINT ============
 bot.callbackQuery('hint', async (ctx) => {
   const sess = sessions.get(ctx.from.id);
   if (!sess) return ctx.answerCallbackQuery({ text: 'Начните с /start' });
@@ -394,15 +428,17 @@ bot.callbackQuery('hint', async (ctx) => {
   await ctx.answerCallbackQuery();
 
   const isDE = sess.jur === 'DE';
+  const lastQuestion = sess.history.filter(m => m.role === 'assistant').slice(-1)[0]?.content || '';
+  const query = sess.incident + ' ' + lastQuestion;
+  const relevant = findRelevantArticles(sess.jur, query, 3);
   const histText = sess.history.map(m => (m.role === 'user' ? '👤 ' : '🤖 ') + m.content).join('\n\n');
 
   try {
     await ctx.replyWithChatAction('typing');
     const r = await ai.chat.completions.create({
       model: MODEL,
-      messages: [{ role: 'user', content: buildHintPrompt(sess.jur, sess.status, isDE ? 'de' : 'ru', sess.incident, histText) }],
-      temperature: 0.5,
-      max_tokens: 300
+      messages: [{ role: 'user', content: buildHintPrompt(sess.jur, sess.status, isDE ? 'de' : 'ru', sess.incident, histText, relevant) }],
+      temperature: 0.5, max_tokens: 300
     });
     const answer = r.choices[0].message.content;
     await ctx.reply(answer, { parse_mode: 'Markdown' });
@@ -412,7 +448,7 @@ bot.callbackQuery('hint', async (ctx) => {
   }
 });
 
-// ============ ОСНОВНОЙ ОБРАБОТЧИК ============
+// ============ MAIN ============
 bot.on('message:text', async (ctx) => {
   const text = ctx.message.text;
   if (text.startsWith('/')) return;
@@ -427,23 +463,26 @@ bot.on('message:text', async (ctx) => {
 
   const isDE = sess.jur === 'DE';
 
-  // ========== ПЕРВОЕ СООБЩЕНИЕ — ИНЦИДЕНТ ==========
+  // ========== ПЕРВЫЙ ИНЦИДЕНТ ==========
   if (!sess.incident) {
     sess.incident = text;
     sess.history = [{ role: 'user', content: (isDE ? 'Vorfall: ' : 'Инцидент: ') + text }];
 
     await ctx.reply(isDE ? '⏳ Erste Frage wird vorbereitet...' : '⏳ Готовлю первый вопрос...');
 
+    // Найти релевантные статьи по инциденту
+    const relevant = findRelevantArticles(sess.jur, text, 5);
+    console.log(`🔍 RAG: найдено ${relevant.length} статей для "${text.slice(0, 50)}..."`);
+
     try {
       await ctx.replyWithChatAction('typing');
       const histText = sess.history.map(m => m.content).join('\n\n');
       const r = await ai.chat.completions.create({
         model: MODEL,
-        messages: [{ role: 'user', content: buildQuestionPrompt(sess.jur, sess.status, isDE ? 'de' : 'ru', sess.mode, sess.incident, histText) }],
+        messages: [{ role: 'user', content: buildQuestionPrompt(sess.jur, sess.status, isDE ? 'de' : 'ru', sess.incident, histText, relevant) }],
         temperature: 0.7, max_tokens: 500
       });
       const question = r.choices[0].message.content;
-      sess.currentQuestion = question;
       sess.history.push({ role: 'assistant', content: question });
 
       const kb = new InlineKeyboard();
@@ -460,35 +499,42 @@ bot.on('message:text', async (ctx) => {
     return;
   }
 
-  // ========== ПОЛЬЗОВАТЕЛЬ ОТВЕЧАЕТ ==========
+  // ========== ОТВЕТ ПОЛЬЗОВАТЕЛЯ ==========
   sess.history.push({ role: 'user', content: text });
 
   await ctx.reply(isDE ? '⏳ Analyse läuft...' : '⏳ Анализирую ответ...');
+
+  // RAG по последнему вопросу + ответу
+  const lastQuestion = sess.history.filter(m => m.role === 'assistant').slice(-1)[0]?.content || '';
+  const query = lastQuestion + ' ' + text;
+  const relevant = findRelevantArticles(sess.jur, query, 5);
+  console.log(`🔍 RAG: найдено ${relevant.length} статей для оценки`);
 
   try {
     await ctx.replyWithChatAction('typing');
     const histText = sess.history.map(m => (m.role === 'user' ? '👤 ' : '🎭 ') + m.content).join('\n\n');
 
-    // 1) Разбор ответа
+    // 1) Разбор
     const evalRes = await ai.chat.completions.create({
       model: MODEL,
-      messages: [{ role: 'user', content: buildEvaluationPrompt(sess.jur, sess.status, isDE ? 'de' : 'ru', sess.mode, sess.incident, histText) }],
+      messages: [{ role: 'user', content: buildEvaluationPrompt(sess.jur, sess.status, isDE ? 'de' : 'ru', sess.incident, histText, relevant) }],
       temperature: 0.4, max_tokens: 700
     });
     const evaluation = evalRes.choices[0].message.content;
-
     await ctx.reply(evaluation, { parse_mode: 'Markdown' });
 
-    // 2) Следующий вопрос
+    // 2) Следующий вопрос — с новыми RAG-статьями
+    const allText = sess.incident + ' ' + sess.history.map(m => m.content).join(' ');
+    const nextRelevant = findRelevantArticles(sess.jur, allText, 5);
+
     await ctx.replyWithChatAction('typing');
-    const histText2 = sess.history.map(m => (m.role === 'user' ? '👤 ' : '🎭 ') + m.content).join('\n\n') + '\n\n📊 Оценка была дана.';
+    const histText2 = histText + '\n\n📊 Оценка была дана.';
     const nextRes = await ai.chat.completions.create({
       model: MODEL,
-      messages: [{ role: 'user', content: buildQuestionPrompt(sess.jur, sess.status, isDE ? 'de' : 'ru', sess.mode, sess.incident, histText2) }],
+      messages: [{ role: 'user', content: buildQuestionPrompt(sess.jur, sess.status, isDE ? 'de' : 'ru', sess.incident, histText2, nextRelevant) }],
       temperature: 0.7, max_tokens: 500
     });
     const nextQuestion = nextRes.choices[0].message.content;
-    sess.currentQuestion = nextQuestion;
     sess.history.push({ role: 'assistant', content: nextQuestion });
 
     const kb = new InlineKeyboard();
@@ -505,7 +551,7 @@ bot.on('message:text', async (ctx) => {
   }
 });
 
-// ============ КНОПКА "ЗАВЕРШИТЬ" ============
+// ============ FINISH ACTION ============
 bot.callbackQuery('finish_action', async (ctx) => {
   await ctx.answerCallbackQuery();
   await ctx.reply('Отправьте /finish для итоговой оценки.');
@@ -513,9 +559,9 @@ bot.callbackQuery('finish_action', async (ctx) => {
 
 // ============ START ============
 bot.start({ drop_pending_updates: true });
-console.log('🚀 Dopros Trainer v2 started');
+console.log('🚀 Dopros Trainer v3 (мини-RAG) started');
 
 const httpApp = express();
-httpApp.get('/', (req, res) => res.send('Dopros Trainer v2 is running'));
+httpApp.get('/', (req, res) => res.send('Dopros Trainer v3 (mini-RAG)'));
 const PORT = process.env.PORT || 3000;
 httpApp.listen(PORT, () => console.log('HTTP server on port ' + PORT));
