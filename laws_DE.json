@@ -1,1 +1,84 @@
-
+{
+  "jurisdiction": "DE",
+  "last_updated": "2026-10-01",
+  "articles": [
+    {
+      "id": "gg-art1",
+      "title": "Grundgesetz, Art. 1 — Menschenwürde",
+      "text": "Die Würde des Menschen ist unantastbar. Sie zu achten und zu schützen ist Verpflichtung aller staatlichen Gewalt. Das Deutsche Volk bekennt sich darum zu unverletzlichen und unveräußerlichen Menschenrechten als Grundlage jeder menschlichen Gemeinschaft, des Friedens und der Gerechtigkeit in der Welt.",
+      "keywords": ["Menschenwürde", "Grundrechte", "Staat", "Schutz"]
+    },
+    {
+      "id": "gg-art2",
+      "title": "Grundgesetz, Art. 2 — allgemeine Handlungsfreiheit",
+      "text": "Jeder hat das Recht auf die freie Entfaltung seiner Persönlichkeit, soweit er nicht die Rechte anderer verletzt und nicht gegen die verfassungsmäßige Ordnung oder das Sittengesetz verstößt.",
+      "keywords": ["Freiheit", "Persönlichkeit", "Entfaltung", "Rechte"]
+    },
+    {
+      "id": "gg-art20",
+      "title": "Grundgesetz, Art. 20 Abs. 3 — Rechtsstaatsprinzip",
+      "text": "Die Gesetzgebung ist an die verfassungsmäßige Ordnung, die vollziehende Gewalt und die Rechtsprechung sind an Gesetz und Recht gebunden.",
+      "keywords": ["Rechtsstaat", "Gesetz", "Bindung", "Gericht"]
+    },
+    {
+      "id": "stpo-136",
+      "title": "StPO § 136 — Belehrung des Beschuldigten",
+      "text": "Bei Beginn der ersten Vernehmung ist dem Beschuldigten zu eröffnen, welche Tat ihm zur Last gelegt wird. Er ist darauf hinzuweisen, dass es ihm freisteht, sich zu der Beschuldigung zu äußern oder nicht zur Sache auszusagen. Er ist ferner darauf hinzuweisen, dass er zu seiner Entlastung einzelne Beweiserhebungen beantragen und sich jederzeit eines Verteidigers bedienen kann.",
+      "keywords": ["Beschuldigter", "Belehrung", "Schweigerecht", "Verteidiger", "Vernehmung", "Aussage"]
+    },
+    {
+      "id": "stpo-136a",
+      "title": "StPO § 136a — Verbot von Folter, Täuschung, Ermüdung, Zwang",
+      "text": "Die Freiheit der Willensentschließung und der Willensbetätigung des Beschuldigten darf nicht beeinträchtigt werden durch Misshandlung, durch Ermüdung, durch körperlichen Eingriff, durch Verabreichung von Mitteln, durch Quälerei, durch Täuschung oder durch Hypnose. Drohungen mit unzulässigen Maßnahmen oder Versprechungen von gesetzlich nicht vorgesehenen Vorteilen sind unzulässig.",
+      "keywords": ["Folter", "Zwang", "Täuschung", "Ermüdung", "Drohung", "Willensfreiheit", "Verbot"]
+    },
+    {
+      "id": "stpo-163a",
+      "title": "StPO § 163a — Vernehmung des Beschuldigten",
+      "text": "Der Beschuldigte ist spätestens vor dem Abschluss der Ermittlungen zu vernehmen. §§ 133 bis 136a gelten entsprechend.",
+      "keywords": ["Beschuldigter", "Vernehmung", "Ermittlung", "Abschluss"]
+    },
+    {
+      "id": "stpo-52",
+      "title": "StPO § 52 — Zeugnisverweigerungsrecht (Angehörige)",
+      "text": "Zur Verweigerung des Zeugnisses sind berechtigt: der Verlobte, der Ehegatte, Lebenspartner, sowie Verwandte und Verschwägerte gerader Linie und in der Seitenlinie bis zum dritten Grad.",
+      "keywords": ["Zeuge", "Zeugnisverweigerung", "Angehörige", "Ehegatte", "Verwandte", "Verlobte"]
+    },
+    {
+      "id": "stpo-55",
+      "title": "StPO § 55 — Auskunftsverweigerungsrecht (Selbstbelastung)",
+      "text": "Jeder Zeuge kann die Auskunft auf solche Fragen verweigern, deren Beantwortung ihm selbst oder einem der in § 52 Abs. 1 bezeichneten Angehörigen die Gefahr zuziehen würde, wegen einer Straftat oder Ordnungswidrigkeit verfolgt zu werden.",
+      "keywords": ["Zeuge", "Auskunftsverweigerung", "Selbstbelastung", "Angehörige", "Straftat"]
+    },
+    {
+      "id": "stpo-58",
+      "title": "StPO § 58 — Vernehmung von Zeugen",
+      "text": "Zeugen sind einzeln und in Abwesenheit der später zu hörenden Zeugen zu vernehmen. Eine Gegenüberstellung mit anderen Zeugen oder mit dem Beschuldigten ist zulässig, wenn dies erforderlich ist und die Erforschung der Wahrheit dadurch nicht gefährdet wird.",
+      "keywords": ["Zeuge", "Vernehmung", "einzeln", "Gegenüberstellung", "Wahrheit"]
+    },
+    {
+      "id": "stpo-70",
+      "title": "StPO § 70 — Folgen der Zeugnisverweigerung",
+      "text": "Wird das Zeugnis oder die Eidesleistung ohne gesetzlichen Grund verweigert, so werden dem Zeugen die durch die Weigerung verursachten Kosten auferlegt.",
+      "keywords": ["Zeuge", "Verweigerung", "Folgen", "Kosten"]
+    },
+    {
+      "id": "jgg-67",
+      "title": "JGG § 67 — Jugendstrafrecht, Anwendung",
+      "text": "Das JGG gilt für Taten, die von einem Jugendlichen (14 bis 17 Jahre) oder Heranwachsenden (18 bis 20 Jahre) begangen werden. Für Jugendliche gelten besondere Verfahrensregeln.",
+      "keywords": ["Jugendlich", "Heranwachsend", "JGG", "14", "18", "20"]
+    },
+    {
+      "id": "jgg-70",
+      "title": "JGG § 70 — Vernehmung des Beschuldigten",
+      "text": "Bei der Vernehmung eines Jugendlichen ist der Erziehungsberechtigte zuzuziehen, wenn dies zur Sicherung der Erziehung erforderlich ist. Bei Heranwachsenden gilt dies entsprechend.",
+      "keywords": ["Jugendlich", "Vernehmung", "Erziehungsberechtigter", "Eltern"]
+    },
+    {
+      "id": "owig-55",
+      "title": "OWiG § 55 — Auskunftsverweigerung (Ordnungswidrigkeiten)",
+      "text": "Jeder Betroffene kann die Auskunft auf solche Fragen verweigern, deren Beantwortung ihm selbst oder einem Angehörigen die Gefahr zuziehen würde, wegen einer Straftat oder Ordnungswidrigkeit verfolgt zu werden.",
+      "keywords": ["Ordnungswidrigkeit", "Auskunft", "Verweigerung", "Selbstbelastung"]
+    }
+  ]
+}
