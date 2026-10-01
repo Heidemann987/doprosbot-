@@ -1,4 +1,4 @@
-// bot.js — Dopros Trainer v3 (мини-RAG: KZ, RU, DE)
+// bot.js — Dopros Trainer v4 (мини-RAG, жёсткие ограничения языка)
 const { Bot, InlineKeyboard } = require('grammy');
 const OpenAI = require('openai');
 const express = require('express');
@@ -42,8 +42,7 @@ console.log('📚 Laws loaded:', {
   DE: LAWS.DE.length
 });
 
-// ============ MINI-RAG SEARCH ============
-// Простой поиск: сколько ключевых слов из запроса встречается в keywords статьи
+// ============ MINI-RAG ============
 function findRelevantArticles(jur, query, limit = 5) {
   const articles = LAWS[jur] || [];
   if (!articles.length) return [];
@@ -89,14 +88,30 @@ const JUR = {
   DE: { name: 'Deutschland', lang: 'de' }
 };
 
-// ============ BUILD CONTEXT FROM RAG ============
+// ============ LANGUAGE GUARD ============
+// Проверяет ответ AI: если много английских символов в русской юрисдикции — режем
+function detectLanguage(text) {
+  const latinCount = (text.match(/[a-zA-Z]/g) || []).length;
+  const cyrillicCount = (text.match(/[а-яА-ЯёЁ]/g) || []).length;
+  const total = latinCount + cyrillicCount;
+  if (total === 0) return 'unknown';
+  return latinCount > cyrillicCount ? 'latin' : 'cyrillic';
+}
+
+function enforceLanguage(text, expectedLang) {
+  const detected = detectLanguage(text);
+  // Если ожидается русский, но ответ латиницей — вернуть null
+  if (expectedLang === 'ru' && detected === 'latin') return null;
+  if (expectedLang === 'de' && detected === 'cyrillic') return null;
+  return text;
+}
+
+// ============ BUILD LAWS CONTEXT ============
 function buildLawsContext(jur, articles) {
   if (!articles.length) {
-    return '(keine spezifischen Artikel gefunden / статьи не найдены)';
+    return '(нет найденных статей / keine Artikel gefunden)';
   }
-  return articles.map(a =>
-    `\n### ${a.title}\n${a.text}\n`
-  ).join('\n');
+  return articles.map(a => `\n### ${a.title}\n${a.text}\n`).join('\n');
 }
 
 // ============ QUESTION PROMPT ============
@@ -105,60 +120,12 @@ function buildQuestionPrompt(jur, status, lang, incident, history, relevantLaws)
   const lawsContext = buildLawsContext(jur, relevantLaws);
 
   if (lang === 'de') {
-    return `Du bist Ermittler in einem Verhör in ${JUR[jur].name}. Verfahrensstatus: ${statusText}.
+    return `⚠️ PFLICHT: Antworte AUSSCHLIESSLICH auf DEUTSCH.
+⚠️ VERBOTEN: Englisch, Russisch, jede andere Sprache.
+⚠️ VERBOTEN: Analyse, Bewertung, Kommentare, dein Denken zeigen.
+⚠️ NUR EINE FRAGE.
 
-VORFALL:
-${incident}
-
-BISHERIGER DIALOG:
-${history}
-
-RELEVANTE GESETZE (nutze NUR diese):
-${lawsContext}
-
-DEINE AUFGABE: Stelle die NÄCHSTE Frage als Ermittler. NUR die Frage — keine Analyse, kein Kommentar.
-
-FORMAT:
-🎭 Ermittler: [Frage auf Deutsch]
-
-REGELN:
-- Nur EINE Frage.
-- Auf Deutsch.
-- Ohne Analyse, ohne Bewertung.
-- Realistisch, passend zum Status "${statusText}".`;
-  }
-
-  return `Ты — следователь на допросе в ${JUR[jur].name}. Процессуальный статус: ${statusText}.
-
-ИНЦИДЕНТ:
-${incident}
-
-ПРЕДЫДУЩИЙ ДИАЛОГ:
-${history}
-
-РЕЛЕВАНТНЫЕ СТАТЬИ (используй ТОЛЬКО эти):
-${lawsContext}
-
-ТВОЯ ЗАДАЧА: задать СЛЕДУЮЩИЙ вопрос как следователь. ТОЛЬКО вопрос — без анализа.
-
-ФОРМАТ:
-🎭 Следователь: [вопрос на русском]
-
-ПРАВИЛА:
-- Только ОДИН вопрос.
-- На русском.
-- Без анализа, без оценки.
-- Реалистично, под статус "${statusText}".`;
-}
-
-// ============ EVALUATION PROMPT ============
-function buildEvaluationPrompt(jur, status, lang, incident, history, relevantLaws) {
-  const statusText = lang === 'de' ? STATUS[status].de : STATUS[status].ru;
-  const lawsContext = buildLawsContext(jur, relevantLaws);
-
-  if (lang === 'de') {
-    return `Du bist Trainer-Anwalt. Bewerte die letzte Antwort des Nutzers.
-
+Du bist Ermittler in einem Verhör in ${JUR[jur].name}.
 Status: ${statusText}.
 
 VORFALL:
@@ -167,29 +134,21 @@ ${incident}
 DIALOG:
 ${history}
 
-RELEVANTE GESETZE (zitiere NUR diese):
+GESETZE:
 ${lawsContext}
 
-FORMAT:
+FORMAT (exakt einhalten):
+🎭 Ermittler: [eine Frage auf Deutsch]
 
-📊 Bewertung: [✅ / ⚠️ / ❌]
-
-⚠️ Fehler: [was falsch war — oder "keine"]
-
-🎯 Etalon: [korrekte Formulierung]
-
-📚 Artikel: [genaue Titel der Artikel oben]
-
-💬 Kurz: [1-2 Sätze]
-
-REGELN:
-- Bewerte nur die LETZTE Antwort.
-- Zitiere NUR Artikel aus der Liste oben.
-- Auf Deutsch.`;
+DEINE ANTWORT BESTEHT NUR AUS DIESEM FORMAT. KEIN TEXT DAVOR ODER DANACH.`;
   }
 
-  return `Ты — тренер-адвокат. Оцени последний ответ пользователя.
+  return `⚠️ ОБЯЗАТЕЛЬНО: отвечай ТОЛЬКО на РУССКОМ языке.
+⚠️ ЗАПРЕЩЕНО: английский, немецкий, любой другой язык.
+⚠️ ЗАПРЕЩЕНО: анализ, оценка, комментарии, показ рассуждений.
+⚠️ ТОЛЬКО ОДИН ВОПРОС.
 
+Ты — следователь на допросе в ${JUR[jur].name}.
 Статус: ${statusText}.
 
 ИНЦИДЕНТ:
@@ -198,25 +157,83 @@ ${incident}
 ДИАЛОГ:
 ${history}
 
-РЕЛЕВАНТНЫЕ СТАТЬИ (цитируй ТОЛЬКО эти):
+СТАТЬИ:
 ${lawsContext}
 
-ФОРМАТ:
+ФОРМАТ (строго):
+🎭 Следователь: [один вопрос на русском]
+
+ТВОЙ ОТВЕТ — ТОЛЬКО ЭТОТ ФОРМАТ. НИКАКОГО ТЕКСТА ДО ИЛИ ПОСЛЕ.`;
+}
+
+// ============ EVALUATION PROMPT ============
+function buildEvaluationPrompt(jur, status, lang, incident, history, relevantLaws) {
+  const statusText = lang === 'de' ? STATUS[status].de : STATUS[status].ru;
+  const lawsContext = buildLawsContext(jur, relevantLaws);
+
+  if (lang === 'de') {
+    return `⚠️ PFLICHT: Antworte AUSSCHLIESSLICH auf DEUTSCH.
+⚠️ VERBOTEN: Englisch, Russisch, jede andere Sprache.
+⚠️ VERBOTEN: Analyse der Rolle, Denken zeigen, "The user...".
+⚠️ NUR das Format unten.
+
+Du bist Trainer-Anwalt.
+Status: ${statusText}.
+
+VORFALL:
+${incident}
+
+DIALOG:
+${history}
+
+GESETZE:
+${lawsContext}
+
+FORMAT (exakt einhalten):
+
+📊 Bewertung: [✅ / ⚠️ / ❌]
+
+⚠️ Fehler: [1 Satz oder "keine"]
+
+🎯 Etalon: «[korrekte Formulierung]»
+
+📚 Artikel: [genaue Titel aus GESETZE]
+
+💬 Kurz: [1-2 Sätze]
+
+DEINE ANTWORT BESTEHT NUR AUS DIESEM FORMAT. KEIN TEXT DAVOR ODER DANACH.`;
+  }
+
+  return `⚠️ ОБЯЗАТЕЛЬНО: отвечай ТОЛЬКО на РУССКОМ языке.
+⚠️ ЗАПРЕЩЕНО: английский, немецкий, любой другой язык.
+⚠️ ЗАПРЕЩЕНО: анализ роли, показ рассуждений, "The user...".
+⚠️ ТОЛЬКО формат ниже.
+
+Ты — тренер-адвокат.
+Статус: ${statusText}.
+
+ИНЦИДЕНТ:
+${incident}
+
+ДИАЛОГ:
+${history}
+
+СТАТЬИ:
+${lawsContext}
+
+ФОРМАТ (строго):
 
 📊 Оценка: [✅ / ⚠️ / ❌]
 
-⚠️ Ошибка: [что не так — или "нет"]
+⚠️ Ошибка: [1 предложение или "нет"]
 
-🎯 Эталон: [правильная формулировка]
+🎯 Эталон: «[правильная формулировка]»
 
-📚 Статьи: [точные заголовки из списка выше]
+📚 Статьи: [точные названия из СТАТЬИ]
 
 💬 Коротко: [1-2 предложения]
 
-ПРАВИЛА:
-- Оценивай только ПОСЛЕДНИЙ ответ.
-- Цитируй ТОЛЬКО статьи из списка выше.
-- На русском.`;
+ТВОЙ ОТВЕТ — ТОЛЬКО ЭТОТ ФОРМАТ. НИКАКОГО ТЕКСТА ДО ИЛИ ПОСЛЕ.`;
 }
 
 // ============ HINT PROMPT ============
@@ -225,38 +242,30 @@ function buildHintPrompt(jur, status, lang, incident, history, relevantLaws) {
   const lawsContext = buildLawsContext(jur, relevantLaws);
 
   if (lang === 'de') {
-    return `Du bist Trainer-Anwalt. Der Nutzer bittet um einen HINWEIS.
+    return `⚠️ NUR DEUTSCH. Max 2 Sätze. KEINE Analyse.
 
 Status: ${statusText}.
 VORFALL: ${incident}
 DIALOG: ${history}
 
-RELEVANTE GESETZE:
+GESETZE:
 ${lawsContext}
 
-Gib 1-2 Sätze Hinweis — NICHT die komplette Antwort.
-
 FORMAT:
-💡 Hinweis: [kurz, unter 300 Zeichen]
-
-Auf Deutsch.`;
+💡 Hinweis: [max 2 Sätze auf Deutsch]`;
   }
 
-  return `Ты — тренер-адвокат. Пользователь просит ПОДСКАЗКУ.
+  return `⚠️ ТОЛЬКО РУССКИЙ. Максимум 2 предложения. БЕЗ анализа.
 
 Статус: ${statusText}.
 ИНЦИДЕНТ: ${incident}
 ДИАЛОГ: ${history}
 
-РЕЛЕВАНТНЫЕ СТАТЬИ:
+СТАТЬИ:
 ${lawsContext}
 
-Дай 1-2 предложения — НЕ полный ответ.
-
 ФОРМАТ:
-💡 Подсказка: [коротко, до 300 символов]
-
-На русском.`;
+💡 Подсказка: [максимум 2 предложения на русском]`;
 }
 
 // ============ SESSIONS ============
@@ -265,6 +274,43 @@ const sessions = new Map();
 // ============ BOT ============
 const bot = new Bot(BOT_TOKEN);
 bot.catch((err) => console.error('Bot error:', err));
+
+// ============ AI CALL WRAPPER with retry ============
+async function callAI(prompt, maxTokens, expectedLang) {
+  const response = await ai.chat.completions.create({
+    model: MODEL,
+    messages: [{ role: 'user', content: prompt }],
+    temperature: 0.6,
+    max_tokens: maxTokens
+  });
+
+  let text = response.choices[0].message.content || '';
+
+  // Проверка языка
+  const langOk = enforceLanguage(text, expectedLang);
+  if (!langOk) {
+    // Повторный запрос с ещё более жёстким требованием
+    console.warn(`⚠️ Language violation detected. Retrying...`);
+    const retryResponse = await ai.chat.completions.create({
+      model: MODEL,
+      messages: [
+        { role: 'user', content: prompt },
+        { role: 'assistant', content: text },
+        {
+          role: 'user',
+          content: expectedLang === 'de'
+            ? 'FALSCH! Antworte NUR auf Deutsch. Kein Englisch. Nur das Format.'
+            : 'НЕВЕРНО! Отвечай ТОЛЬКО на русском. Никакого английского. Только формат.'
+        }
+      ],
+      temperature: 0.3,
+      max_tokens: maxTokens
+    });
+    text = retryResponse.choices[0].message.content || '';
+  }
+
+  return text;
+}
 
 // ============ /start ============
 bot.command('start', async (ctx) => {
@@ -386,29 +432,30 @@ bot.command('finish', async (ctx) => {
   }
 
   const isDE = sess.jur === 'DE';
-  const summaryPrompt = isDE
-    ? 'Fasse die Trainingssitzung zusammen: Stärken, Schwächen, was zu wiederholen. Kurz.'
-    : 'Подведи итог: сильные стороны, слабые, что повторить. Кратко.';
+  const expectedLang = isDE ? 'de' : 'ru';
 
-  // Найти статьи по всему инциденту + истории
   const allText = sess.incident + ' ' + sess.history.map(m => m.content).join(' ');
   const relevant = findRelevantArticles(sess.jur, allText, 5);
 
-  const messages = [
-    { role: 'system', content: isDE
-      ? `Du bist Trainer-Anwalt. Status: ${STATUS[sess.status].de}.`
-      : `Ты тренер-адвокат. Статус: ${STATUS[sess.status].ru}.`
-    },
-    ...sess.history,
-    { role: 'user', content: summaryPrompt + '\n\nRelevante Artikel:\n' + buildLawsContext(sess.jur, relevant) }
-  ];
+  const summaryPrompt = isDE
+    ? `⚠️ NUR DEUTSCH. Fasse die Trainingssitzung zusammen: Stärken, Schwächen, was zu wiederholen. Kurz.
+
+VORFALL: ${sess.incident}
+DIALOG: ${sess.history.map(m => m.content).join('\n\n')}
+
+GESETZE:
+${buildLawsContext(sess.jur, relevant)}`
+    : `⚠️ ТОЛЬКО РУССКИЙ. Подведи итог тренировки: сильные стороны, слабые, что повторить. Кратко.
+
+ИНЦИДЕНТ: ${sess.incident}
+ДИАЛОГ: ${sess.history.map(m => m.content).join('\n\n')}
+
+СТАТЬИ:
+${buildLawsContext(sess.jur, relevant)}`;
 
   try {
     await ctx.replyWithChatAction('typing');
-    const r = await ai.chat.completions.create({
-      model: MODEL, messages, temperature: 0.5, max_tokens: 1200
-    });
-    const answer = r.choices[0].message.content;
+    const answer = await callAI(summaryPrompt, 1200, expectedLang);
     const title = isDE ? '🎓 *AUSWERTUNG*\n\n' : '🎓 *ИТОГ*\n\n';
     await ctx.reply(title + answer, { parse_mode: 'Markdown' });
   } catch (e) {
@@ -428,6 +475,7 @@ bot.callbackQuery('hint', async (ctx) => {
   await ctx.answerCallbackQuery();
 
   const isDE = sess.jur === 'DE';
+  const expectedLang = isDE ? 'de' : 'ru';
   const lastQuestion = sess.history.filter(m => m.role === 'assistant').slice(-1)[0]?.content || '';
   const query = sess.incident + ' ' + lastQuestion;
   const relevant = findRelevantArticles(sess.jur, query, 3);
@@ -435,12 +483,11 @@ bot.callbackQuery('hint', async (ctx) => {
 
   try {
     await ctx.replyWithChatAction('typing');
-    const r = await ai.chat.completions.create({
-      model: MODEL,
-      messages: [{ role: 'user', content: buildHintPrompt(sess.jur, sess.status, isDE ? 'de' : 'ru', sess.incident, histText, relevant) }],
-      temperature: 0.5, max_tokens: 300
-    });
-    const answer = r.choices[0].message.content;
+    const answer = await callAI(
+      buildHintPrompt(sess.jur, sess.status, expectedLang, sess.incident, histText, relevant),
+      300,
+      expectedLang
+    );
     await ctx.reply(answer, { parse_mode: 'Markdown' });
   } catch (e) {
     console.error(e);
@@ -462,6 +509,7 @@ bot.on('message:text', async (ctx) => {
   if (!sess.status) return ctx.reply('Выберите статус: /start');
 
   const isDE = sess.jur === 'DE';
+  const expectedLang = isDE ? 'de' : 'ru';
 
   // ========== ПЕРВЫЙ ИНЦИДЕНТ ==========
   if (!sess.incident) {
@@ -470,19 +518,17 @@ bot.on('message:text', async (ctx) => {
 
     await ctx.reply(isDE ? '⏳ Erste Frage wird vorbereitet...' : '⏳ Готовлю первый вопрос...');
 
-    // Найти релевантные статьи по инциденту
     const relevant = findRelevantArticles(sess.jur, text, 5);
-    console.log(`🔍 RAG: найдено ${relevant.length} статей для "${text.slice(0, 50)}..."`);
+    console.log(`🔍 RAG: найдено ${relevant.length} статей`);
 
     try {
       await ctx.replyWithChatAction('typing');
       const histText = sess.history.map(m => m.content).join('\n\n');
-      const r = await ai.chat.completions.create({
-        model: MODEL,
-        messages: [{ role: 'user', content: buildQuestionPrompt(sess.jur, sess.status, isDE ? 'de' : 'ru', sess.incident, histText, relevant) }],
-        temperature: 0.7, max_tokens: 500
-      });
-      const question = r.choices[0].message.content;
+      const question = await callAI(
+        buildQuestionPrompt(sess.jur, sess.status, expectedLang, sess.incident, histText, relevant),
+        500,
+        expectedLang
+      );
       sess.history.push({ role: 'assistant', content: question });
 
       const kb = new InlineKeyboard();
@@ -504,7 +550,6 @@ bot.on('message:text', async (ctx) => {
 
   await ctx.reply(isDE ? '⏳ Analyse läuft...' : '⏳ Анализирую ответ...');
 
-  // RAG по последнему вопросу + ответу
   const lastQuestion = sess.history.filter(m => m.role === 'assistant').slice(-1)[0]?.content || '';
   const query = lastQuestion + ' ' + text;
   const relevant = findRelevantArticles(sess.jur, query, 5);
@@ -515,26 +560,24 @@ bot.on('message:text', async (ctx) => {
     const histText = sess.history.map(m => (m.role === 'user' ? '👤 ' : '🎭 ') + m.content).join('\n\n');
 
     // 1) Разбор
-    const evalRes = await ai.chat.completions.create({
-      model: MODEL,
-      messages: [{ role: 'user', content: buildEvaluationPrompt(sess.jur, sess.status, isDE ? 'de' : 'ru', sess.incident, histText, relevant) }],
-      temperature: 0.4, max_tokens: 700
-    });
-    const evaluation = evalRes.choices[0].message.content;
+    const evaluation = await callAI(
+      buildEvaluationPrompt(sess.jur, sess.status, expectedLang, sess.incident, histText, relevant),
+      700,
+      expectedLang
+    );
     await ctx.reply(evaluation, { parse_mode: 'Markdown' });
 
-    // 2) Следующий вопрос — с новыми RAG-статьями
+    // 2) Следующий вопрос
     const allText = sess.incident + ' ' + sess.history.map(m => m.content).join(' ');
     const nextRelevant = findRelevantArticles(sess.jur, allText, 5);
 
     await ctx.replyWithChatAction('typing');
     const histText2 = histText + '\n\n📊 Оценка была дана.';
-    const nextRes = await ai.chat.completions.create({
-      model: MODEL,
-      messages: [{ role: 'user', content: buildQuestionPrompt(sess.jur, sess.status, isDE ? 'de' : 'ru', sess.incident, histText2, nextRelevant) }],
-      temperature: 0.7, max_tokens: 500
-    });
-    const nextQuestion = nextRes.choices[0].message.content;
+    const nextQuestion = await callAI(
+      buildQuestionPrompt(sess.jur, sess.status, expectedLang, sess.incident, histText2, nextRelevant),
+      500,
+      expectedLang
+    );
     sess.history.push({ role: 'assistant', content: nextQuestion });
 
     const kb = new InlineKeyboard();
@@ -554,14 +597,16 @@ bot.on('message:text', async (ctx) => {
 // ============ FINISH ACTION ============
 bot.callbackQuery('finish_action', async (ctx) => {
   await ctx.answerCallbackQuery();
-  await ctx.reply('Отправьте /finish для итоговой оценки.');
+  const sess = sessions.get(ctx.from.id);
+  const isDE = sess?.jur === 'DE';
+  await ctx.reply(isDE ? 'Senden Sie /finish für die Auswertung.' : 'Отправьте /finish для итоговой оценки.');
 });
 
 // ============ START ============
 bot.start({ drop_pending_updates: true });
-console.log('🚀 Dopros Trainer v3 (мини-RAG) started');
+console.log('🚀 Dopros Trainer v4 (жёсткие ограничения языка) started');
 
 const httpApp = express();
-httpApp.get('/', (req, res) => res.send('Dopros Trainer v3 (mini-RAG)'));
+httpApp.get('/', (req, res) => res.send('Dopros Trainer v4 running'));
 const PORT = process.env.PORT || 3000;
 httpApp.listen(PORT, () => console.log('HTTP server on port ' + PORT));
